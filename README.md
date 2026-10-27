@@ -1,95 +1,80 @@
 # Zlin · 开发与算法手记
 
-个人博客，分为 **工作手记** 与 **算法题库**。使用 Markdown 管理内容，以 Node.js 生成静态 HTML，浏览器只加载必要的原生 JavaScript。
+网站：https://zlin-dev-notes.zlin20050509.chatgpt.site
+笔记管理：https://zlin-dev-notes.zlin20050509.chatgpt.site/admin/
 
-- 网站：https://zlin-dev-notes.zlin20050509.chatgpt.site
-- 仓库：https://github.com/Zlin0509/z-web
-- 支持全文搜索、分类与标签筛选、题目收藏、深色模式、文章目录、代码高亮与复制、RSS 和站点地图。
-- 收藏和主题保存在访客自己的浏览器，不上传服务器，也不跨设备同步。
+## 在线写作
 
-## 本地运行
+点击网站页尾的 **笔记管理**，使用创建本站时的 ChatGPT 账号登录。公开页面无需登录；其他账号即使已登录，也不能读取草稿或操作管理接口。
 
-需要 Node.js 18 或更新版本（CI 使用 Node.js 22）。
+- 新建笔记，选择工作手记 / 算法题库、分类、标签和日期。
+- 使用 Markdown 编辑器与分栏预览，支持标题、列表、表格、链接、引用、代码高亮和复制。
+- **保存草稿**：仅管理员可见。编辑已发布文章时，线上正文保持原样。
+- **发布文章 / 更新发布**：将当前草稿公开，首页、栏目、全文搜索、RSS 与站点地图立即使用新内容，无需重新部署。
+- **撤回发布**：移出公开页面，保留草稿。
+- **回收站**：移入后不再公开，恢复时回到私有草稿，避免误公开。
+- 支持 Markdown 文件导入、当前编辑内容下载、最近 30 个历史保存版本载入，以及全部云端笔记 JSON 备份（包含草稿与回收站）。
+- 编辑过程中有未保存提示，离开前会提醒；Ctrl / ⌘ S 保存。没有静默自动保存，离线或报错时请下载当前 Markdown 留存。
+- 多标签页通过版本号校验避免覆盖。遇到冲突时保留当前文字，先导出，再重新选中笔记加载最新版本。
+
+已发布笔记的栏目和网址标识不可直接更改；如需更改，先撤回发布。这样可以减少无意造成的旧链接失效。
+
+## 内容存储与代码仓库
+
+正式内容持久化到 Sites 托管的 Cloudflare D1 数据库。在线管理笔记不依赖本地电脑，也不需要 GitHub 写入权限。
+
+**在线笔记不会自动提交到 GitHub。** GitHub 保存网站代码和初始示例，D1 保存在线内容；需要离线副本时，请从后台下载 Markdown 或 JSON 备份。JSON 备份当前用于留档，后台支持的直接导入格式是 Markdown。
+
+`website/content/` 中原有的 7 个 Markdown 文件（含 1 个比赛复盘草稿）只用于第一次初始化数据库。初始化有持久标记，此后重新部署不会覆盖线上编辑、撤回或回收站状态。
+
+管理权限首次通过平台验证的所有者邮箱绑定本站稳定用户 ID；绑定后按用户 ID 授权，不会把编辑权限开放给任意登录用户。平台负责登录与会话；应用逐次校验接口权限、请求来源、字段与版本号。Markdown 禁止执行内嵌 HTML。
+
+## 本地开发
+
+需要 Node.js **22.13.0 或更新版本**；建议使用 Node.js 22 LTS。
 
 ```bash
 npm ci
+# 创建不提交的 .dev.vars，填入下面的本地模拟账号
+# NOTEBOOK_OWNER_EMAIL="seedy@sites.test"
+npm run build
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_fixed_white_tiger.sql
 npm run dev
 ```
 
-打开终端打印的 `http://127.0.0.1:4321`。修改 `website/` 下的文件后自动重新构建，刷新页面即可查看。可通过环境变量 `PORT` 修改端口。
+本地预览默认使用 http://localhost:5173；端口可通过 `npm run dev -- --port 4321` 设置。第一次启动前应用一次本地 SQL 迁移，不要重复执行已应用迁移。新增结构后使用 `npm run db:generate`，按顺序应用新迁移；已经应用的迁移文件不可修改。
+
+便携预览中的「使用 ChatGPT 登录」仅在回环地址模拟 `local_seedy / seedy@sites.test`，这一模拟逻辑不会进入生产构建。生产环境没有本地测试账号或测试密码。
 
 ```bash
-npm run build       # 生成 dist/
-npm run preview     # 构建并预览，不监听文件
-npm test            # 内容规则与安全渲染测试
-npm run check       # 检查已构建页面的站内链接与锚点
+npm test              # SQLite 上验证身份授权、草稿隔离、发布、回收站、冲突与 Markdown 导入导出
+npm run build         # Vinext / Cloudflare Worker 和静态资产
+npm run check         # 初始内容生成与站内链接检查
 npx playwright install chromium
-npm run test:browser # 桌面与手机交互测试；Linux 需要浏览器系统依赖
+npm run test:browser  # 桌面 / 手机公开页面与登录编辑流程
 ```
 
-## 写一篇文章
+## 项目结构
+
+- `website/assets/`：原有设计、公开页面交互、Markdown 编辑器样式与脚本。
+- `website/templates.mjs`：公开页面模板；`website/admin-templates.mjs`：登录页与管理台。
+- `website/markdown.mjs`：共享 Markdown 渲染与目录生成。
+- `server/controller.mjs`：动态页面、搜索 / RSS / 站点地图和管理 API。
+- `server/model.mjs`：请求校验；`server/store.mjs`：权限绑定、笔记状态与持久化。
+- `db/schema.ts`、`drizzle/`：数据库结构及不可变的迁移记录。
+- `app/chatgpt-auth.ts`：平台登录辅助函数；`app/route.ts`：服务端入口。
+- `scripts/vite/`、`worker/`：Sites 官方构建与运行集成，需保留。
+- `website/site.json`：站点名称、介绍、GitHub 地址与正式网址。
+
+## 部署代码更新
+
+`.openai/hosting.json` 保留原 Site ID，声明 `d1: "DB"`，站点继续公开访问。`NOTEBOOK_OWNER_EMAIL` 是 Sites 的服务端环境配置，不得写进源码或前端。生产邮箱配置变更不会自动重新绑定已经授权的用户 ID。
 
 ```bash
-npm run new -- work my-agent-note "我的 Agent 开发笔记"
-npm run new -- algorithms my-problem "一道值得回顾的题"
-```
-
-新文件默认是草稿，完成后把 `draft` 改为 `false`。可直接在 `website/content/work/` 或 `website/content/algorithms/` 中添加 `.md` 文件：
-
-```yaml
----
-title: "文章标题"
-description: "用于列表、搜索和分享的一句话摘要"
-date: "2026-10-27"
-category: "Agent 工程"
-tags: [Agent, 工具调用]
-draft: false
----
-```
-
-正文写在第二个 `---` 之后。文件名使用小写英文、数字与连字符，例如 `agent-memory.md`，它会成为文章网址的一部分。日期用引号包裹。草稿不会出现在页面、搜索索引、RSS 或站点地图中。
-
-| 主栏目 | 可选分类 |
-| --- | --- |
-| 工作手记 `work` | Agent 工程、开发实践、思考随笔 |
-| 算法题库 `algorithms` | 题目解析、算法专题、比赛复盘 |
-
-题目可额外填写：
-
-```yaml
-difficulty: "基础"  # 入门 / 基础 / 进阶 / 挑战，表示自定义学习难度
-source: "https://www.luogu.com.cn/problem/P4779"
-sourceLabel: "洛谷 P4779 · 原题"
-```
-
-`featured: true` 可让同一天的文章优先展示。首页与栏目统计均从内容生成。
-
-初始 6 篇文章均标有 `sample: true`，是展示结构的示例，不代表真实项目或比赛经历。可直接删除或改写；写成自己的正式文章后移除 `sample`。比赛复盘草稿位于 `website/content/algorithms/contest-review-template.md`。
-
-## 修改设计与个人信息
-
-- `website/site.json`：名字、站点标题、网址、GitHub 地址、介绍。
-- `website/templates.mjs`：页面结构、首页与关于页文案。
-- `website/assets/style.css`：颜色、布局、深色模式与响应式样式。
-- `website/assets/app.js`：搜索、筛选、收藏和复制等交互。
-- `website/content.mjs`：Markdown 解析和内容校验。
-- `website/build.mjs`：静态页面、搜索索引、RSS、站点地图生成。
-
-字体优先使用 Google Fonts；无法连接时使用本机中文字体与系统字体，不影响功能。网站没有登录后台，发布内容通过修改 Markdown 完成。
-
-## 同步与发布
-
-```bash
-git pull --ff-only
-# 编辑内容后执行检查
 npm test && npm run build && npm run check
 git add .
-git commit -m "Add a new note"
+git commit -m "Update notebook website"
 git push origin main
 ```
 
-GitHub Actions 会检查内容、构建和站内链接。**推送到 GitHub 不会自动更新 Sites 上的线上网站**。需要在 Codex 中要求「发布当前网站更新」，使用仓库内 `.openai/hosting.json` 记录的同一 Site 完成构建、源码同步与部署。
-
-站点已选择公开访问。`.openai/hosting.json` 只存站点 ID 与构建目录，不包含密钥；发布凭证不得提交到 Git。
-
-也可将 `dist/` 部署到任何支持目录索引的静态托管平台。迁移时修改 `website/site.json` 中的 `url` 并重新构建。若使用 GitHub Pages 项目路径 `/z-web/`，需额外配置路径前缀或使用独立域名，本项目当前按独立域名根路径生成链接。
+GitHub Actions 负责代码检查；代码更新需要通过 Codex / Sites 发布。**只编辑笔记不需要重新部署**。发布工具会先应用新增数据库迁移，再上传 Worker。数据库与本地预览完全分离，任何真实账号、令牌和 .dev.vars 都不得提交。

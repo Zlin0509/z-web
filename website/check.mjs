@@ -3,7 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
-const dist = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
+const dist = resolve(dirname(fileURLToPath(import.meta.url)), '../.sites-runtime/static-check');
 async function walk(dir) { const files = []; for (const entry of await readdir(dir, { withFileTypes: true })) { const path = resolve(dir, entry.name); files.push(...(entry.isDirectory() ? await walk(path) : [path])); } return files; }
 const files = await walk(dist);
 const htmlFiles = files.filter(path => path.endsWith('.html'));
@@ -17,6 +17,7 @@ for (const file of htmlFiles) {
     const href = match[1].replaceAll('&amp;', '&');
     if (!href.startsWith('/') && !href.startsWith('#')) continue;
     const url = new URL(href, 'https://local.test/' + file.slice(dist.length + 1).replace(/index\.html$/, ''));
+    if (['/signin-with-chatgpt', '/signout-with-chatgpt', '/callback'].includes(url.pathname)) continue;
     let target = resolve(dist, '.' + decodeURIComponent(url.pathname));
     const info = await stat(target).catch(() => { throw new Error(`断链：${file} → ${href}`); });
     if (info.isDirectory()) target = resolve(target, 'index.html');

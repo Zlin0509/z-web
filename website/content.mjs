@@ -1,20 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import YAML from 'yaml';
-import MarkdownIt from 'markdown-it';
-import hljs from 'highlight.js';
+import { groups, renderPost } from './markdown.mjs';
+export { groups, escape, md } from './markdown.mjs';
 
-export const groups = {
-  work: ['Agent 工程', '开发实践', '思考随笔'],
-  algorithms: ['题目解析', '算法专题', '比赛复盘'],
-};
-export const escape = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
-export const md = new MarkdownIt({ html: false, linkify: true, typographer: true, highlight(code, language) {
-  const output = language && hljs.getLanguage(language) ? hljs.highlight(code, { language }).value : escape(code);
-  return `<pre class="code-block"><span class="code-language">${escape(language || 'text')}</span><button class="copy-code" type="button" aria-label="复制代码">复制</button><code class="hljs">${output}</code></pre>`;
-}});
-
-export async function readPosts(contentRoot = new URL('./content/', import.meta.url)) {
+export async function readPosts(contentRoot = new URL('./content/', import.meta.url), { includeDrafts = false } = {}) {
   const posts = [];
   const used = new Set();
   for (const section of Object.keys(groups)) {
@@ -36,19 +25,8 @@ export async function readPosts(contentRoot = new URL('./content/', import.meta.
       if (meta.difficulty && !['入门', '基础', '进阶', '挑战'].includes(meta.difficulty)) throw new Error(`${file}: 难度无效`);
       if (used.has(slug)) throw new Error(`重复文章 slug: ${slug}`);
       used.add(slug);
-      if (meta.draft) continue;
-      const toc = [];
-      const tokens = md.parse(match[2], {});
-      tokens.forEach((token, index) => {
-        if (token.type === 'heading_open') {
-          const title = tokens[index + 1].content;
-          const id = `section-${toc.length + 1}`;
-          token.attrSet('id', id);
-          toc.push({ title, id, level: Number(token.tag.slice(1)) });
-        }
-      });
-      posts.push({ ...meta, section, slug, body: match[2], html: md.renderer.render(tokens, md.options, {}), toc,
-        url: `/${section}/${slug}/`, minutes: Math.max(1, Math.ceil(match[2].length / 650)) });
+      if (meta.draft && !includeDrafts) continue;
+      posts.push(renderPost({ ...meta, section, slug, body: match[2] }));
     }
   }
   return posts.sort((a,b) => b.date.localeCompare(a.date) || Number(Boolean(b.featured)) - Number(Boolean(a.featured)) || a.title.localeCompare(b.title, 'zh-CN'));

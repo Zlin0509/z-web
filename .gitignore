@@ -9,3 +9,13 @@ test-results/
 playwright-report/
 *.log
 .DS_Store
+
+.next/
+.vinext/
+.wrangler/
+outputs/
+next-env.d.ts
+*.tsbuildinfo
+.dev.vars*
+public/assets/
+website/generated/
