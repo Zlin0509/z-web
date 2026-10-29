@@ -13,6 +13,7 @@ function html(body,path,title='',options={},status=200) { return new Response(la
 export async function handleRequest(request,env,user) {
   const path=new URL(request.url).pathname.replace(/\/+$/,'')||'/'; const admin=path==='/admin'||path.startsWith('/api/admin/');
   try {
+    if(path==='/trading' && (request.method==='GET'||request.method==='HEAD')) return new Response(null,{status:302,headers:{Location:'https://zlin-trading-lab.zlin20050509.chatgpt.site/', 'Cache-Control':'no-store'}});
     if(admin&&!user) { if(path==='/admin')return html(loginPage(),'/admin/','登录笔记管理',{noindex:true,section:'admin'});throw new HttpError(401,'请先登录再管理笔记。'); }
     if(!env.DB)throw new HttpError(503,'笔记存储暂时不可用，请稍后重试。');
     if(admin)await requireOwner(env.DB,user,env.NOTEBOOK_OWNER_EMAIL);

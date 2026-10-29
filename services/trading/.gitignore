@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.dev.vars*
+.env
+.env.*
+!.env.example
+.sites-runtime/
+.wrangler/
+.vinext/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+test-results/
+playwright-report/

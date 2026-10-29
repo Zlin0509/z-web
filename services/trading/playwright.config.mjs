@@ -1,0 +1,2 @@
+import { defineConfig,devices } from '@playwright/test';
+export default defineConfig({testDir:'./tests',testMatch:'*.spec.mjs',workers:1,timeout:60000,expect:{timeout:15000},use:{baseURL:'http://127.0.0.1:4322',trace:'retain-on-failure'},projects:[{name:'desktop',use:{viewport:{width:1440,height:1000}}},{name:'mobile',use:{...devices['iPhone 13'],defaultBrowserType:'chromium'}}],webServer:{command:'npm run preview',url:'http://127.0.0.1:4322',reuseExistingServer:true,timeout:120000}});

@@ -17,7 +17,7 @@ for (const file of htmlFiles) {
     const href = match[1].replaceAll('&amp;', '&');
     if (!href.startsWith('/') && !href.startsWith('#')) continue;
     const url = new URL(href, 'https://local.test/' + file.slice(dist.length + 1).replace(/index\.html$/, ''));
-    if (['/signin-with-chatgpt', '/signout-with-chatgpt', '/callback'].includes(url.pathname)) continue;
+    if (['/trading/', '/trading', '/signin-with-chatgpt', '/signout-with-chatgpt', '/callback'].includes(url.pathname)) continue;
     let target = resolve(dist, '.' + decodeURIComponent(url.pathname));
     const info = await stat(target).catch(() => { throw new Error(`断链：${file} → ${href}`); });
     if (info.isDirectory()) target = resolve(target, 'index.html');
