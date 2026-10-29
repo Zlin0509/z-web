@@ -50,8 +50,25 @@ export async function refresh(db,env,id=null,fetcher=fetch){
   if(locked.meta.changes!==1)throw new Problem(409,'行情同步正在进行，请稍后查看。');
   const report=[];
   try{const assets=id?[await assetById(db,id)]:(await db.prepare("SELECT * FROM assets WHERE source!='csv' ORDER BY market,symbol").all()).results;
-    for(const asset of assets){try{const incoming=await loadMarket(asset,env,fetcher),old=JSON.parse(asset.data),merged=[...new Map([...old,...incoming].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);const r=await db.prepare("UPDATE assets SET data=?,status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(merged),now(),asset.id,asset.revision).run();if(r.meta.changes!==1){report.push({symbol:asset.symbol,status:'conflict'});continue;}await advancePaper(db,asset,merged);report.push({symbol:asset.symbol,status:'ready',bars:merged.length});}
-      catch(error){const message=error instanceof Problem?error.message:'更新失败，已保留之前的数据。';const status=error.status===424?'needs_key':'error';await db.prepare('UPDATE assets SET status=?,message=? WHERE id=? AND revision=?').bind(status,message,asset.id,asset.revision).run();report.push({symbol:asset.symbol,status,message});}}
+    for(const asset of assets){try{
+      const old=JSON.parse(asset.data),latest=old.at(-1)?.time;
+      const currentDay=Math.floor(Date.now()/86400000)*86400000;
+      const cached=asset.source!=='csv'&&old.length>0&&(asset.market==='crypto'?latest>=currentDay-86400000:Date.now()-Date.parse(asset.updated)<900000);
+      if(cached){
+        await advancePaper(db,asset,old);
+        await db.prepare("UPDATE assets SET status='ready',message=NULL WHERE id=? AND revision=?").bind(asset.id,asset.revision).run();
+        report.push({symbol:asset.symbol,status:'cached',bars:old.length,message:'已复用最新完整日线，无需重复请求。'});continue;
+      }
+      const incoming=await loadMarket(asset,{...env,DB:db},fetcher),merged=[...new Map([...old,...incoming].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);
+      const r=await db.prepare("UPDATE assets SET data=?,status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(merged),now(),asset.id,asset.revision).run();
+      if(r.meta.changes!==1){report.push({symbol:asset.symbol,status:'conflict'});continue;}
+      await advancePaper(db,asset,merged);report.push({symbol:asset.symbol,status:'ready',bars:merged.length});
+    }catch(error){
+      const message=error instanceof Problem?error.message:'更新失败，已保留之前的数据。';
+      const status=error.status===424?'needs_key':error.status===429?'rate_limited':'error';
+      await db.prepare('UPDATE assets SET status=?,message=? WHERE id=? AND revision=?').bind(status,message,asset.id,asset.revision).run();
+      report.push({symbol:asset.symbol,status,message,...(error.retryAt?{retryAt:new Date(error.retryAt).toISOString()}:{})});
+    }}
     await log(db,'refresh',{report});return {report,completedAt:now()};
   }finally{await db.prepare("DELETE FROM service_state WHERE key='refresh_lock' AND json_extract(value,'$.lease')=?").bind(lease).run();}
 }

@@ -20,6 +20,7 @@ export async function handleRequest(request,env,user){
     await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);await init(env.DB);env=await connections.configured(env);
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
+    if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
     if(path==='/api/quotes'&&request.method==='GET'){const cached=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();if(cached&&Date.now()-JSON.parse(cached.value).time<15000)return json(JSON.parse(cached.value).data);const data=await connections.quotes(env);await env.DB.prepare("INSERT INTO service_state(key,value) VALUES('quotes_cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({time:Date.now(),data})).run();return json(data);}
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
     if(path==='/'&&request.method==='GET')return html(page());

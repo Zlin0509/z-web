@@ -45,12 +45,16 @@ OKX 账户 Key / Secret / Passphrase 和 DeepSeek Key / Model 通过服务端秘
 
 ## 网页连接配置与最新报价
 
-登录后进入「服务接入」，下方「密钥配置与 Schwab 账户」可填写 DeepSeek API Key/Model、Alpaca Key ID/Secret、Schwab App Key/Secret。密钥在服务端用 AES-256-GCM 加密存入 D1，主密钥 CONFIG_ENCRYPTION_KEY 保存在 Sites secrets；配置接口只返回已配置状态，输入空白保留旧值。切勿直接轮换主密钥，否则旧配置无法解密。
+登录后进入「服务接入」，下方「密钥配置与 Schwab 账户」可填写 DeepSeek API Key、Alpaca Key ID/Secret、Schwab App Key/Secret。密钥在服务端用 AES-256-GCM 加密存入 D1，主密钥 CONFIG_ENCRYPTION_KEY 保存在 Sites secrets；配置接口只返回已配置状态，输入空白保留旧值。切勿直接轮换主密钥，否则旧配置无法解密。
 
-最新报价独立于回测日线：OKX 使用浏览器公共 WebSocket，并以 REST 快照作为备用；美股使用 Alpaca IEX 最新买卖报价，每15秒轮询，明确标注单交易所覆盖和时间。市场休市、缺少权限或限流不会显示为实时成功。日线指标与模拟任务仍按日线处理，不用实时价替代历史收盘价。
+最新报价独立于回测日线：OKX 使用浏览器公共 WebSocket，不再重复轮询 OKX REST 快照；美股使用 Alpaca IEX 最新买卖报价，每15秒轮询，明确标注单交易所覆盖和时间。市场休市、缺少权限或限流不会显示为实时成功。日线指标与模拟任务仍按日线处理，不用实时价替代历史收盘价。
 
 Schwab 回调地址为 `https://zlin-trading-lab.zlin20050509.chatgpt.site/schwab/callback`。注册应用需要 Accounts and Trading Production；Market Data Production 可按需申请，本版美股报价使用 Alpaca。网页通过顶层 OAuth 授权，服务端加密保存和刷新令牌；失效后需重新授权。支持账户/持仓/近7日订单读取、普通时段DAY股票整股限价单预览与提交、撤单。单笔最多1000 USD；预览60秒过期，提交一次性领取，超时结果未知时不自动重发。
 
 本地预览不是 Schwab 券商预检。真实提交和撤单受服务端 SCHWAB_LIVE_TRADING_ENABLED=true 开关保护，网页无法启用该开关。当前无真实凭证，尚未完成券商联调，保持关闭。自动策略仍仅模拟，不会自动调用这些实盘接口。DeepSeek仍只生成研究建议。
 
 免费美股报价说明：[Alpaca Market Data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)。IEX不是全美综合SIP。
+
+限流处理：日线同步会复用已有最新完整 UTC 日线，美股成功快照缓存15分钟；遇到 HTTP 429、OKX 50011 或 Alpha Vantage 配额提示时，按数据源保存冷却状态，遵守 Retry-After 并指数退避（默认1至15分钟）。冷却期间不再请求该源，保留历史数据及原更新时间，并显示可重试时间。下一次同步在冷却到期后重试。
+
+DeepSeek 模型选择：保存 API Key 后自动调用官方 GET /models 获取该账号可用模型，使用下拉列表由用户选择并保存，不写死模型或自动选择第一项。打开配置页会重新获取列表，失败时显示原因并可手动重试；已有且仍可用的选择会保留。

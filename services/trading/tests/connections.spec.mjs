@@ -2,6 +2,8 @@ import {test,expect} from '@playwright/test';
 
 test('owner can save secrets without reading them back and sees streamed quote timestamps',async({page},info)=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const modelId='available-model-'+info.project.name+'-'+Date.now();let modelError=false;
+  await page.route('**/api/deepseek/models',r=>r.fulfill(modelError?{status:502,json:{error:'上游暂时不可用'}}:{json:{models:[{id:modelId,name:'账号可用模型'},{id:'another-model',name:'另一模型'}]}}));
   await page.route('**/api/quotes',r=>r.fulfill({json:{quotes:[{symbol:'BTC-USDT',error:'REST limited'},{symbol:'AAPL',error:'请配置 Alpaca'}]}}));
   await page.routeWebSocket('wss://ws.okx.com:8443/ws/v5/public',ws=>ws.onMessage(message=>{
     if(message==='ping')return ws.send('pong');
@@ -18,6 +20,15 @@ test('owner can save secrets without reading them back and sees streamed quote t
   await expect(page.locator('[name="DEEPSEEK_API_KEY"]')).toHaveValue('');
   const state=await page.evaluate(async()=>await(await fetch('/api/settings')).text());
   expect(state).not.toContain(secret);expect(JSON.parse(state).configured.DEEPSEEK_API_KEY).toBe(true);
+  await expect(page.locator('[name="DEEPSEEK_MODEL"]')).toHaveValue('');
+  await page.locator('[name="DEEPSEEK_MODEL"]').selectOption(modelId);
+  await page.getByRole('button',{name:'保存配置',exact:true}).click();
+  await expect(page.locator('#connection-message')).toContainText('配置已加密保存');
+  await expect(page.locator('[name="DEEPSEEK_MODEL"]')).toHaveValue(modelId);
+  const saved=await page.evaluate(async()=>await(await fetch('/api/settings')).json());expect(saved.model).toBe(modelId);
+  modelError=true;await page.getByRole('button',{name:'重新获取模型列表'}).click();
+  await expect(page.locator('#model-message')).toContainText('列表获取失败');
+  await expect(page.locator('[name="DEEPSEEK_MODEL"]')).toBeDisabled();
   await expect(page.locator('#submit-live')).toBeDisabled();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
   await page.screenshot({path:'/tmp/zlin-connections-'+info.project.name+'.png',fullPage:true});

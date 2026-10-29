@@ -1,6 +1,7 @@
 import { Problem, normalizeBars, finite } from './engine.mjs';
-async function getJSON(url,options={},fetcher=fetch) {
-  let response;try{response=await fetcher.call(globalThis,String(url),{...options,redirect:'manual',signal:AbortSignal.timeout(12000)});}catch(error){console.error('Market transport error',error.name);throw new Problem(502,'数据源连接超时或不可达；已保留上次成功数据。');}
+import {marketFetch} from './market-http.mjs';
+async function getJSON(url,options={},fetcher=fetch,env={}) {
+  let response;try{response=await marketFetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(12000)},env,fetcher);}catch(error){if(error instanceof Problem)throw error;console.error('Market transport error',error.name);throw new Problem(502,'数据源连接超时或不可达；已保留上次成功数据。');}
   if(!response.ok)throw new Problem(502,`数据源返回 HTTP ${response.status}；请稍后重试。`);
   try{return await response.json();}catch{throw new Problem(502,'数据源返回格式不正确。');}
 }
@@ -8,12 +9,12 @@ export async function loadMarket(asset,env,fetcher=fetch) {
   if(asset.source==='csv')throw new Problem(409,'CSV 数据通过文件更新，不进行联网刷新。');
   if(asset.market==='crypto') {
     const url=new URL('https://www.okx.com/api/v5/market/candles');url.search=new URLSearchParams({instId:asset.symbol,bar:'1Dutc',limit:'300'});
-    const data=await getJSON(url.toString(),{},fetcher);if(data.code!=='0'||!Array.isArray(data.data))throw new Problem(502,'OKX 行情接口暂不可用或交易对不存在。');
+      const data=await getJSON(url.toString(),{},fetcher,env);if(data.code!=='0'||!Array.isArray(data.data))throw new Problem(502,'OKX 行情接口暂不可用或交易对不存在。');
     return normalizeBars(data.data.filter(x=>x[8]==='1'&&Number(x[0])+86400000<=Date.now()).map(x=>({time:Number(x[0]),open:Number(x[1]),high:Number(x[2]),low:Number(x[3]),close:Number(x[4]),volume:Number(x[5])})));
   }
   if(!env.ALPHA_VANTAGE_API_KEY)throw new Problem(424,'待配置美股数据密钥；目前可导入 CSV 回测。');
   const url=new URL('https://www.alphavantage.co/query');url.search=new URLSearchParams({function:'TIME_SERIES_DAILY',symbol:asset.symbol,outputsize:'compact',apikey:env.ALPHA_VANTAGE_API_KEY});
-  const data=await getJSON(url,{},fetcher),series=data['Time Series (Daily)'];if(!series)throw new Problem(502,'美股接口没有返回日线，请检查密钥、代码或调用额度。');
+    const data=await getJSON(url,{},fetcher,env),series=data['Time Series (Daily)'];if(!series)throw new Problem(502,'美股接口没有返回日线，请检查密钥、代码或调用额度。');
   const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}).format(new Date());
   // Exclude today's potentially incomplete US trading session, including extended hours.
   return normalizeBars(Object.entries(series).filter(([d])=>d<today).map(([d,x])=>({time:Date.parse(d),open:+x['1. open'],high:+x['2. high'],low:+x['3. low'],close:+x['4. close'],volume:+x['5. volume']})));
