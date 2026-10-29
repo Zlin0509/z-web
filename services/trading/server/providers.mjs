@@ -1,6 +1,6 @@
 import { Problem, normalizeBars, finite } from './engine.mjs';
 async function getJSON(url,options={},fetcher=fetch) {
-  let response;try{response=await fetcher.call(globalThis,String(url),{...options,redirect:'manual',signal:AbortSignal.timeout(12000)});}catch(error){console.error('Market transport error',error.name,error.message);throw new Problem(502,'数据源连接超时或不可达；已保留上次成功数据。');}
+  let response;try{response=await fetcher.call(globalThis,String(url),{...options,redirect:'manual',signal:AbortSignal.timeout(12000)});}catch(error){console.error('Market transport error',error.name);throw new Problem(502,'数据源连接超时或不可达；已保留上次成功数据。');}
   if(!response.ok)throw new Problem(502,`数据源返回 HTTP ${response.status}；请稍后重试。`);
   try{return await response.json();}catch{throw new Problem(502,'数据源返回格式不正确。');}
 }
