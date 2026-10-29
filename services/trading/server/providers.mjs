@@ -5,6 +5,7 @@ async function getJSON(url,options={},fetcher=fetch,env={}) {
   if(!response.ok)throw new Problem(502,`数据源返回 HTTP ${response.status}；请稍后重试。`);
   try{return await response.json();}catch{throw new Problem(502,'数据源返回格式不正确。');}
 }
+export function marketSource(asset,env){return asset.source==='csv'?'csv':asset.market==='crypto'?'okx':env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY?'alpaca':'alpha';}
 export async function loadMarket(asset,env,fetcher=fetch) {
   if(asset.source==='csv')throw new Problem(409,'CSV 数据通过文件更新，不进行联网刷新。');
   if(asset.market==='crypto') {
@@ -12,7 +13,23 @@ export async function loadMarket(asset,env,fetcher=fetch) {
       const data=await getJSON(url.toString(),{},fetcher,env);if(data.code!=='0'||!Array.isArray(data.data))throw new Problem(502,'OKX 行情接口暂不可用或交易对不存在。');
     return normalizeBars(data.data.filter(x=>x[8]==='1'&&Number(x[0])+86400000<=Date.now()).map(x=>({time:Number(x[0]),open:Number(x[1]),high:Number(x[2]),low:Number(x[3]),close:Number(x[4]),volume:Number(x[5])})));
   }
-  if(!env.ALPHA_VANTAGE_API_KEY)throw new Problem(424,'待配置美股数据密钥；目前可导入 CSV 回测。');
+    if(marketSource(asset,env)==='alpaca'){
+      const dayFormat=new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}),today=dayFormat.format(new Date());
+      const url=new URL('https://data.alpaca.markets/v2/stocks/'+encodeURIComponent(asset.symbol)+'/bars');
+      url.search=new URLSearchParams({timeframe:'1Day',feed:'iex',adjustment:'raw',sort:'asc',limit:'1000',start:new Date(Date.now()-550*86400000).toISOString(),end:today+'T00:00:00Z'});
+      const rows=[];let page=0;
+      for(;;){
+        const data=await getJSON(url,{headers:{'APCA-API-KEY-ID':env.ALPACA_API_KEY,'APCA-API-SECRET-KEY':env.ALPACA_SECRET_KEY}},fetcher,env);
+        if(!Array.isArray(data.bars))throw new Problem(502,'Alpaca 未返回该标的的 IEX 日线。');
+        rows.push(...data.bars);if(!data.next_page_token)break;
+        if(++page>=5)throw new Problem(502,'Alpaca 日线分页未完成，请缩小范围后重试。');
+        url.searchParams.set('page_token',data.next_page_token);
+      }
+      const completed=rows.map(x=>({...x,date:dayFormat.format(new Date(x.t))})).filter(x=>x.date<today);
+      if(!completed.length)throw new Problem(404,'该标的在 Alpaca IEX 暂无已完成日线。');
+      return normalizeBars(completed.map(x=>({time:Date.parse(x.date),open:x.o,high:x.h,low:x.l,close:x.c,volume:x.v})));
+    }
+    if(!env.ALPHA_VANTAGE_API_KEY)throw new Problem(424,'请配置 Alpaca 或 Alpha Vantage 美股数据密钥，也可导入 CSV 回测。');
   const url=new URL('https://www.alphavantage.co/query');url.search=new URLSearchParams({function:'TIME_SERIES_DAILY',symbol:asset.symbol,outputsize:'compact',apikey:env.ALPHA_VANTAGE_API_KEY});
     const data=await getJSON(url,{},fetcher,env),series=data['Time Series (Daily)'];if(!series)throw new Problem(502,'美股接口没有返回日线，请检查密钥、代码或调用额度。');
   const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}).format(new Date());

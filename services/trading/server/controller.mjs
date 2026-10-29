@@ -1,6 +1,6 @@
 import * as connections from './connections.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
-import {init,authorize,state,assetById,addAsset,importBars,runBacktest,startPaper,refresh,log} from './service.mjs';
+import {init,authorize,state,assetById,addAsset,removeAsset,importBars,runBacktest,startPaper,refresh,log} from './service.mjs';
 import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
 import {page,login} from '../ui/page.mjs';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'same-origin'};
@@ -15,7 +15,7 @@ export async function handleRequest(request,env,user){
     // This service is OWNER-PRIVATE at the Sites access boundary. Dispatch consumes
     // its service credential before these unattended routes; never make this Site public.
     if(path==='/internal/refresh'&&request.method==='POST'){if(request.headers.get('origin')||request.headers.get('x-trading-service')!=='1')throw new Problem(403,'仅支持服务端调度。');await init(env.DB);return json(await refresh(env.DB,await connections.configured(env)));}
-    if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);return json({assets:s.assets,events:s.events.slice(0,2)});}
+    if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);const snapshot=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();return json({assets:s.assets,events:s.events.slice(0,2),quoteSnapshot:snapshot?JSON.parse(snapshot.value):null});}
     if(!user){if(path==='/')return html(login());throw new Problem(401,'请先登录交易研究室。');}
     await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);
     if(path==='/'&&request.method==='GET')return html(page());
@@ -39,6 +39,7 @@ export async function handleRequest(request,env,user){
     if(path==='/api/schwab/preview')return json(await connections.previewOrder(env,input));
     if(path==='/api/schwab/submit')return json(await connections.submitOrder(env,input));
     if(path==='/api/schwab/cancel')return json(await connections.cancelOrder(env,input));
+    if(path==='/api/assets/remove')return json(await removeAsset(env.DB,input.assetId,input.revision));
     if(path==='/api/assets'){await addAsset(env.DB,input);return json({ok:true},201);}
     if(path==='/api/import'){await importBars(env.DB,input.assetId,parseCSV(input.csv),input.revision);return json({ok:true});}
     if(path==='/api/refresh')return json(await refresh(env.DB,env,input.assetId??null));

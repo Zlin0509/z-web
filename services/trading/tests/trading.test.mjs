@@ -64,3 +64,29 @@ test('configuration and asset reads avoid per-secret database round trips',async
   const status=await call(en,'/api/settings');assert.equal(status.status,200);assert.ok(reads<=3,`settings used ${reads} database calls`);
   reads=0;assert.equal((await call(en,'/api/assets/crypto%3ABTC-USDT')).status,200);assert.ok(reads<=3,`asset read used ${reads} database calls`);
 });
+
+test('Alpaca supplies completed IEX daily bars, follows pagination, and replaces old provider data',async t=>{
+  const en={...env(t),ALPACA_API_KEY:'test-key',ALPACA_SECRET_KEY:'test-secret'};await call(en,'/api/state');
+  const history=bars(100),rows=history.map(b=>({t:new Date(b.time+16*3600000).toISOString(),o:b.open,h:b.high,l:b.low,c:b.close,v:b.volume}));let calls=0;
+  const mock=async(url,options)=>{calls++;const u=new URL(url);assert.equal(u.hostname,'data.alpaca.markets');assert.equal(u.searchParams.get('feed'),'iex');assert.equal(u.searchParams.get('timeframe'),'1Day');assert.equal(u.searchParams.get('adjustment'),'raw');assert.equal(options.headers['APCA-API-KEY-ID'],'test-key');return Response.json(u.searchParams.has('page_token')?{bars:rows.slice(50),next_page_token:null}:{bars:[{...rows[0],t:new Date(Date.now()+day).toISOString()},...rows.slice(0,50)],next_page_token:'next'});};
+  await en.DB.prepare("UPDATE assets SET data=?,status='ready',updated=? WHERE id='us:AAPL'").bind(JSON.stringify([{...history[0],time:history[0].time-day,close:1}]),new Date().toISOString()).run();
+  const result=await refresh(en.DB,en,'us:AAPL',mock);assert.equal(result.report[0].source,'alpaca');assert.equal(calls,2);
+  const a=await(await call(en,'/api/assets/us%3AAAPL')).json();assert.equal(a.source,'alpaca');assert.deepEqual(a.data,history);assert.equal(a.data.length,100);
+  const second=await refresh(en.DB,en,'us:AAPL',()=>{throw Error('cache should be reused');});assert.equal(second.report[0].status,'cached');
+});
+
+test('removing a watched asset stops its simulations, retains historical results and rejects stale versions',async t=>{
+  const en=env(t);await call(en,'/api/state');const history=bars();const mock=async()=>Response.json({code:'0',data:history.map(b=>[String(b.time),b.open,b.high,b.low,b.close,b.volume,'0','0','1'])});
+  await refresh(en.DB,en,'crypto:BTC-USDT',mock);
+  assert.equal((await call(en,'/api/backtest',{data:{assetId:'crypto:BTC-USDT',config:{fast:5,slow:20}}})).status,201);
+  assert.equal((await call(en,'/api/paper',{data:{assetId:'crypto:BTC-USDT',config:{fast:5,slow:20}}})).status,201);
+  const asset=await(await call(en,'/api/assets/crypto%3ABTC-USDT')).json();
+  assert.equal((await call(en,'/api/assets/remove',{data:{assetId:asset.id,revision:asset.revision-1}})).status,409);
+  assert.equal((await(await call(en,'/api/state')).json()).sessions[0].status,'running');
+  assert.equal((await call(en,'/api/assets/remove',{user:null,data:{assetId:asset.id,revision:asset.revision}})).status,401);
+  assert.equal((await call(en,'/api/assets/remove',{data:{assetId:asset.id,revision:asset.revision}})).status,200);
+  const state=await(await call(en,'/api/state')).json();assert.equal(state.assets.length,3);assert.equal(state.sessions[0].status,'stopped');assert.equal(state.runs.length,1);
+  assert.equal((await call(en,'/api/assets/'+encodeURIComponent(asset.id))).status,404);
+  assert.equal((await call(en,'/api/assets',{data:{market:'crypto',symbol:'BTC-USDT'}})).status,201);
+  assert.equal((await(await call(en,'/api/state')).json()).sessions[0].status,'stopped');
+});
