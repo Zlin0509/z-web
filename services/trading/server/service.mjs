@@ -18,8 +18,14 @@ export async function authorize(db,user,email){
 export async function assetById(db,id){const a=await db.prepare('SELECT * FROM assets WHERE id=?').bind(id).first();if(!a)throw new Problem(404,'没有找到这个标的。');return a;}
 export function describe(a){const bars=JSON.parse(a.data);return {...a,data:undefined,bars:bars.length,asOf:bars.at(-1)?.time??null,indicators:bars.length?indicators(bars,a.market):null};}
 export async function state(db,env){
-  const assets=(await db.prepare('SELECT * FROM assets ORDER BY market,symbol').all()).results;
-  return {assets:assets.map(describe),runs:(await db.prepare('SELECT id,asset_id,created,result FROM backtests ORDER BY created DESC LIMIT 30').all()).results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:(await db.prepare('SELECT * FROM paper_sessions ORDER BY created DESC LIMIT 30').all()).results.map(r=>({...r,data:JSON.parse(r.data)})),events:(await db.prepare('SELECT * FROM events ORDER BY created DESC LIMIT 40').all()).results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:(await db.prepare('SELECT * FROM analyses ORDER BY created DESC LIMIT 20').all()).results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!env.ALPHA_VANTAGE_API_KEY,okxAccount:!!(env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
+  const [assets,runs,sessions,events,analyses]=await Promise.all([
+    db.prepare('SELECT * FROM assets ORDER BY market,symbol').all(),
+    db.prepare('SELECT id,asset_id,created,result FROM backtests ORDER BY created DESC LIMIT 30').all(),
+    db.prepare('SELECT * FROM paper_sessions ORDER BY created DESC LIMIT 30').all(),
+    db.prepare('SELECT * FROM events ORDER BY created DESC LIMIT 40').all(),
+    db.prepare('SELECT * FROM analyses ORDER BY created DESC LIMIT 20').all()
+  ]);
+  return {assets:assets.results.map(describe),runs:runs.results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:sessions.results.map(r=>({...r,data:JSON.parse(r.data)})),events:events.results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:analyses.results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!env.ALPHA_VANTAGE_API_KEY,okxAccount:!!(env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
 }
 export async function addAsset(db,input){
   const {market}=input,symbol=String(input.symbol??'').trim().toUpperCase();const source=input.source??(market==='crypto'?'okx':'alpha');

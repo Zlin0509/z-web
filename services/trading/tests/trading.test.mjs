@@ -57,3 +57,10 @@ test('quote polling does not call OKX REST and Alpaca respects persistent rate l
   for(let i=0;i<2;i++){const result=await quotes(cfg);assert.match(result.quotes.find(q=>q.symbol==='AAPL').error,/限流/);}
   assert.equal(count,1);
 });
+
+test('configuration and asset reads avoid per-secret database round trips',async t=>{
+  const en=env(t);await call(en,'/api/state');
+  let reads=0;const prepare=en.DB.prepare.bind(en.DB);t.mock.method(en.DB,'prepare',q=>{reads++;return prepare(q);});
+  const status=await call(en,'/api/settings');assert.equal(status.status,200);assert.ok(reads<=3,`settings used ${reads} database calls`);
+  reads=0;assert.equal((await call(en,'/api/assets/crypto%3ABTC-USDT')).status,200);assert.ok(reads<=3,`asset read used ${reads} database calls`);
+});

@@ -17,13 +17,15 @@ export async function handleRequest(request,env,user){
     if(path==='/internal/refresh'&&request.method==='POST'){if(request.headers.get('origin')||request.headers.get('x-trading-service')!=='1')throw new Problem(403,'仅支持服务端调度。');await init(env.DB);return json(await refresh(env.DB,await connections.configured(env)));}
     if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);return json({assets:s.assets,events:s.events.slice(0,2)});}
     if(!user){if(path==='/')return html(login());throw new Problem(401,'请先登录交易研究室。');}
-    await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);await init(env.DB);env=await connections.configured(env);
-    if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
+    await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);
+    if(path==='/'&&request.method==='GET')return html(page());
+    await init(env.DB);
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
+    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/state','/api/deepseek/models','/api/quotes','/api/refresh','/api/analyze'].includes(path))env=await connections.configured(env);
+    if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
     if(path==='/api/quotes'&&request.method==='GET'){const cached=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();if(cached&&Date.now()-JSON.parse(cached.value).time<15000)return json(JSON.parse(cached.value).data);const data=await connections.quotes(env);await env.DB.prepare("INSERT INTO service_state(key,value) VALUES('quotes_cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({time:Date.now(),data})).run();return json(data);}
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
-    if(path==='/'&&request.method==='GET')return html(page());
     if(path==='/api/state'&&request.method==='GET')return json(await state(env.DB,env));
     const assetMatch=path.match(/^\/api\/assets\/([^/]+)$/);
     if(assetMatch&&request.method==='GET'){const a=await assetById(env.DB,decodeURIComponent(assetMatch[1]));return json({...a,data:JSON.parse(a.data)});}

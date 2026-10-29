@@ -7,7 +7,23 @@ let state=null,tab='overview',selected='crypto:BTC-USDT',asset=null,run=null,bus
 async function api(path,data){const r=await fetch('/api'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Trading-Request':'1'},body:data===undefined?undefined:JSON.stringify(data)});let j;try{j=await r.json();}catch{throw new Error('会话可能已过期，请刷新页面重新登录。');}if(!r.ok)throw new Error(j.error||'请求失败');return j;}
 function notice(message,error=false){const node=$('#notice');node.textContent=message;node.className=error?'error':'';node.hidden=!message;}
 async function task(work){if(busy)return;busy=true;const enabled=[...document.querySelectorAll('button:not(:disabled)')];enabled.forEach(b=>b.disabled=true);try{await work();}catch(err){notice(err.message,true);}finally{busy=false;enabled.forEach(b=>{if(b.isConnected)b.disabled=false;});}}
-async function reload(){state=await api('/state');if(!state.assets.some(a=>a.id===selected))selected=state.assets[0]?.id;asset=selected?await api('/assets/'+encodeURIComponent(selected)):null;$('#sync-status').textContent='已连接云端 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});render();}
+async function reload(){
+  const requested=selected;
+  const [next,nextAsset]=await Promise.all([api('/state'),requested?api('/assets/'+encodeURIComponent(requested)):Promise.resolve(null)]);
+  state=next;if(!state.assets.some(a=>a.id===selected))selected=state.assets[0]?.id;
+  asset=selected===requested?nextAsset:selected?await api('/assets/'+encodeURIComponent(selected)):null;
+  $('#sync-status').textContent='已连接云端 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});render();
+}
+window.addEventListener('trading:settings',event=>{
+  if(!state)return;const flags=event.detail.configured;
+  state.connections.usData=!!flags.ALPHA_VANTAGE_API_KEY;state.connections.deepseek=!!(flags.DEEPSEEK_API_KEY&&flags.DEEPSEEK_MODEL);
+  for(const card of document.querySelectorAll('.connection')){
+    const name=card.querySelector('h2')?.textContent,badge=card.querySelector('.badge');
+    if(name==='美股数据源')badge.textContent=state.connections.usData?'密钥已配置':'等待配置密钥';
+    if(name==='DeepSeek 分析')badge.textContent=state.connections.deepseek?'已配置 · 可分析':'等待配置 API';
+  }
+  const analyze=$('#analyze');if(analyze){analyze.disabled=!state.connections.deepseek;analyze.textContent=state.connections.deepseek?'分析当前标的':'等待接入 DeepSeek';}
+});
 function empty(title,text){return `<div class="empty"><b>${e(title)}</b><span>${e(text)}</span></div>`;}
 function chart(points,benchmark=[],kind='price'){if(!points?.length)return empty('还没有可绘制的数据','同步行情或导入日线后，在这里观察变化。');const values=[...points,...benchmark].map(p=>p.equity??p.close);const lo=Math.min(...values),hi=Math.max(...values),range=hi-lo||1;const left=58,right=770,top=15,bottom=218,t0=points[0].time,t1=points.at(-1).time;const x=t=>left+(t-t0)/(t1-t0||1)*(right-left),y=v=>bottom-(v-lo)/range*(bottom-top);const line=a=>a.map((p,i)=>(i?'L':'M')+x(p.time).toFixed(1)+' '+y(p.equity??p.close).toFixed(1)).join(' ');return `<svg class="chart" viewBox="0 0 800 250" role="img" aria-label="${kind==='price'?'日线收盘价走势':'策略权益和买入持有基准'}">${[0,1,2,3].map(i=>{const v=lo+range*i/3;return `<line class="grid-line" x1="58" x2="770" y1="${y(v)}" y2="${y(v)}"/><text x="49" y="${y(v)+3}" text-anchor="end">${number(v,Math.abs(v)<100?2:0)}</text>`;}).join('')}${benchmark.length?`<path class="chart-line benchmark-line" d="${line(benchmark)}"/>`:''}<path class="chart-line" d="${line(points)}"/><text x="58" y="244">${date(t0)}</text><text x="770" y="244" text-anchor="end">${date(t1)}</text></svg>`;}
 function stats(result){const m=result.metrics;return `<div class="stats">${[['策略收益率',pct(m.totalReturn),m.totalReturn>=0?'positive':'negative'],['最大回撤',pct(m.maxDrawdown),''],['夏普比率',number(m.sharpe),''],['已平仓胜率',pct(m.winRate),'']].map(([label,value,cls])=>`<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`).join('')}</div>`;}
