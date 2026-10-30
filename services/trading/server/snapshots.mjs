@@ -1,3 +1,4 @@
+import {refreshResearchData} from './research-data.mjs';
 import {refreshCatalog} from './catalog.mjs';
 import {Problem} from './engine.mjs';
 import {quotes,configured} from './connections.mjs';
@@ -32,6 +33,7 @@ export async function syncMarket(env,id=null){
   const report=await refresh(env.DB,settings,id);
   const snapshot=await refreshQuotes(settings);
   const catalog=await refreshCatalog(settings);
-  const result={...report,catalog,quotesUpdated:snapshot.fetchedAt,quoteErrors:snapshot.quotes.filter(q=>q.error).map(q=>({symbol:q.symbol,error:q.error}))};
+  const research=await refreshResearchData(settings,id);
+  const result={...report,catalog,research,quotesUpdated:snapshot.fetchedAt,quoteErrors:snapshot.quotes.filter(q=>q.error).map(q=>({symbol:q.symbol,error:q.error}))};
   await env.DB.prepare("INSERT INTO service_state(key,value) VALUES('sync_status',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(result)).run();return result;
 }

@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {config} from '../server/engine.mjs';
-import {compareStrategies} from '../server/strategies.mjs';
+import {evaluateCandidate,splitPlan} from '../server/research.mjs';
 const day=86400000;
 const bars=Array.from({length:240},(_,i)=>{const c=100+i*.1+8*Math.sin(i/8);return {time:Date.UTC(2025,0,1)+i*day,open:c-.4,close:c,high:c+2,low:c-2,volume:1000+i};});
 const rules={entry:{match:'all',conditions:[{left:'sma_fast',op:'gt',right:'sma_slow'}]},exit:{match:'any',conditions:[{left:'sma_fast',op:'lt',right:'sma_slow'}]}};
@@ -16,11 +16,17 @@ test('custom rules, AI generate/optimize, explicit application and saved version
   await page.getByRole('button',{name:'运行回测',exact:false}).click();await expect(page.locator('#notice')).toContainText('回测已完成');
   const name='规则测试 '+info.project.name+' '+Date.now();await page.locator('#strategy-name').fill(name);await page.locator('#save-strategy').click();await expect(page.locator('#strategy-status')).toContainText('版本已保存');
   await page.reload();await page.locator('#saved-strategies').selectOption({label:await page.locator('#saved-strategies option').filter({hasText:name}).textContent()});await page.locator('#load-strategy').click();await expect(page.locator('[name="rules"]')).toHaveValue(JSON.stringify(rules,null,2));
-  let mode;await page.route('**/api/strategies/propose',async route=>{const data=route.request().postDataJSON();mode=data.mode;await route.fulfill({json:{id:'mock',assetId:'us:AAPL',name:'AI 趋势策略',rationale:'增加趋势过滤',risks:['可能出现回撤'],model:'selected-model',source:{symbol:'AAPL',provider:'csv'},config:candidate,comparison:compareStrategies(bars,config(data.config),candidate,'us')}});});
-  await page.locator('[name="fast"]').fill('8');await page.locator('#strategy-goal').fill('减少震荡交易，控制回撤。');await page.locator('#ai-generate').click();await expect(page.locator('#strategy-proposal')).toContainText('验证区间（未提供给模型）');expect(mode).toBe('generate');await expect(page.locator('[name="fast"]')).toHaveValue('8');
+  const plan=splitPlan(bars),session={id:'session',datasetHash:'abc123abc123abc123',bars:240,trialCount:2,maxTrials:12,holdoutStart:bars[192].time,holdoutEnd:bars.at(-1).time,holdoutBars:48,audit:{warnings:['测试数据不保证复权']},finalized:null};let latest;
+  await page.route('**/api/strategies/research?*',r=>r.fulfill({json:{session,experiments:latest?[latest]:[]}}));
+  let mode;await page.route('**/api/strategies/propose',async route=>{const data=route.request().postDataJSON();mode=data.mode;const evaluation=evaluateCandidate(bars,config(data.config),candidate,'us',plan);latest={id:'mock',assetId:'us:AAPL',name:'AI 趋势策略',rationale:'增加趋势过滤',risks:['可能出现回撤'],model:'selected-model',source:{symbol:'AAPL',provider:'csv'},config:candidate,evaluation,comparison:evaluation.comparison,session,datasetHash:session.datasetHash,memoryUsed:2,trials:[{name:'候选一',evaluation},{error:'重复候选已跳过'}]};await route.fulfill({json:latest});});
+  await page.locator('[name="fast"]').fill('8');await page.locator('#strategy-goal').fill('减少震荡交易，控制回撤。');await page.locator('#ai-generate').click();await expect(page.locator('#strategy-proposal')).toContainText('开发验证区间（参与候选筛选）');expect(mode).toBe('generate');await expect(page.locator('[name="fast"]')).toHaveValue('8');
   await page.locator('#apply-proposal').click();await expect(page.locator('[name="fast"]')).toHaveValue('5');
   await page.locator('[data-tab="overview"]').click();await page.locator('[data-tab="backtest"]').click();await expect(page.locator('[name="fast"]')).toHaveValue('5');
   await page.locator('#strategy-goal').fill('降低换手率，保持仓位上限。');await page.locator('#ai-optimize').click();await expect(page.locator('#strategy-status')).toContainText('方案已生成');expect(mode).toBe('optimize');
+  await expect(page.locator('#strategy-proposal')).toContainText('引用 2 条实验记忆');await expect(page.locator('#strategy-proposal')).toContainText('双倍成本');
+  await page.locator('.research-history summary').click();await page.locator('#research-history').selectOption('mock');await page.locator('#load-experiment').click();await expect(page.locator('#strategy-status')).toContainText('没有调用模型');
+  const final={experimentId:'mock',decision:'rejected',reasons:['最终验收平仓不足5次'],candidate:{totalReturn:.01,maxDrawdown:.02,closedTrades:1},baseline:{totalReturn:.03},next:'至少60根新日线'};
+  await page.route('**/api/strategies/finalize',r=>{expect(r.request().postDataJSON().experimentId).toBe('mock');session.finalized=final;return r.fulfill({json:final});});page.once('dialog',d=>d.accept());await page.locator('#finalize-research').click();await expect(page.locator('#holdout-result')).toContainText('未通过 / 证据不足');await expect(page.locator('#finalize-research')).toBeDisabled();
   await page.screenshot({path:'/tmp/zlin-ai-strategies-'+info.project.name+'.png',fullPage:true});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);expect(errors).toEqual([]);
 });

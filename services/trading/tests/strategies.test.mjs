@@ -12,7 +12,7 @@ const group=(left,op,right)=>({match:'all',conditions:[{left,op,right}]});
 const rules={entry:group('sma_fast','gt','sma_slow'),exit:group('sma_fast','lt','sma_slow')};
 const candidate=config({strategy:'custom',fast:5,slow:20,rules});
 async function setup(t){const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec(readFileSync(new URL('../drizzle/0000_thick_randall_flagg.sql',import.meta.url),'utf8'));const DB={prepare(q){let args=[];return {bind(...a){args=a;return this;},first(){return db.prepare(q).get(...args)},all(){return {results:db.prepare(q).all(...args)}},run(){return {meta:{changes:Number(db.prepare(q).run(...args).changes)}}}}},batch(a){db.exec('BEGIN');try{const result=a.map(x=>x.run());db.exec('COMMIT');return result;}catch(e){db.exec('ROLLBACK');throw e;}}};await init(DB);await DB.prepare("UPDATE assets SET data=?,status='ready' WHERE id='us:AAPL'").bind(JSON.stringify(bars)).run();return {DB,DEEPSEEK_API_KEY:'test-secret',DEEPSEEK_MODEL:'selected-model',TRADING_OWNER_EMAIL:'owner@test.com'};}
-const input={assetId:'us:AAPL',prompt:'减少震荡交易，控制回撤',mode:'optimize',config:config({fast:5,slow:30})};
+const input={rounds:1,assetId:'us:AAPL',prompt:'减少震荡交易，控制回撤',mode:'optimize',config:config({fast:5,slow:30})};
 const answer={name:'动量过滤',rationale:'使用快慢均线确认趋势',risks:['震荡期可能连续亏损'],config:candidate};
 const reply=body=>Response.json({choices:[{message:{content:JSON.stringify(body)}}]});
 test('custom rules reject executable input, unsupported fields and malformed groups',()=>{
@@ -46,8 +46,8 @@ test('strategy versions persist immutably and cannot attach a parent from anothe
 });
 test('AI sees training only, uses selected model, enforces user risk/costs, and creates no orders',async t=>{
   const env=await setup(t);let calls=0;
-  const result=await proposeStrategy(env,input,async(url,options)=>{calls++;assert.equal(url,'https://api.deepseek.com/chat/completions');const request=JSON.parse(options.body),context=JSON.parse(request.messages[1].content);assert.equal(request.model,'selected-model');assert.equal(context.trainingEnd,bars[167].time);assert.equal(context.trainingBars,168);assert.ok(context.recentTrainingBars.every(b=>b.time<=bars[167].time));assert.equal(context.validation,undefined);return reply({...answer,config:{...candidate,initial:1e9,feeBps:0,allocation:1,maxDrawdown:.9}});});
-  assert.equal(result.config.initial,input.config.initial);assert.equal(result.config.feeBps,input.config.feeBps);assert.equal(result.config.allocation,input.config.allocation);assert.equal(result.config.maxDrawdown,input.config.maxDrawdown);assert.equal(result.execution,'research_only');assert.equal(result.comparison.validation.bars,72);
+  const result=await proposeStrategy(env,input,async(url,options)=>{calls++;assert.equal(url,'https://api.deepseek.com/chat/completions');const request=JSON.parse(options.body),context=JSON.parse(request.messages[1].content);assert.equal(request.model,'selected-model');assert.equal(context.trainingEnd,bars[95].time);assert.equal(context.trainingBars,96);assert.ok(context.recentTrainingBars.every(b=>b.time<=bars[95].time));assert.equal(context.validation,undefined);return reply({...answer,config:{...candidate,initial:1e9,feeBps:0,allocation:1,maxDrawdown:.9}});});
+  assert.equal(result.config.initial,input.config.initial);assert.equal(result.config.feeBps,input.config.feeBps);assert.equal(result.config.allocation,input.config.allocation);assert.equal(result.config.maxDrawdown,input.config.maxDrawdown);assert.equal(result.execution,'research_only');assert.equal(result.comparison.validation.bars,96);
   assert.equal(env.DB.prepare('SELECT count(*) n FROM paper_sessions').first().n,0);assert.equal((await listStrategies(env)).strategies.length,0);
   await assert.rejects(()=>proposeStrategy(env,input,()=>{calls++;throw 0}),e=>e.status===429);assert.equal(calls,1);
 });
@@ -55,11 +55,12 @@ test('invalid AI output is not saved and insufficient data avoids external calls
   const env=await setup(t);
   await assert.rejects(()=>proposeStrategy(env,input,async()=>reply({...answer,config:{...candidate,rules:{}}})),/入场/);
   assert.equal(env.DB.prepare("SELECT count(*) n FROM service_state WHERE key LIKE 'strategy_experiment:%'").first().n,0);
-  await env.DB.prepare("UPDATE assets SET data=? WHERE id='us:AAPL'").bind(JSON.stringify(bars.slice(0,100))).run();
-  await assert.rejects(()=>proposeStrategy(env,input,()=>{throw Error('must not call')}),/120/);
+  await env.DB.prepare("DELETE FROM service_state WHERE key='strategy_ai_lock'").run();
+  const fresh=await setup(t);await fresh.DB.prepare("UPDATE assets SET data=? WHERE id='us:AAPL'").bind(JSON.stringify(bars.slice(0,100))).run();
+  await assert.rejects(()=>proposeStrategy(fresh,input,()=>{throw Error('must not call')}),/240/);
 });
 test('strategy and internal endpoints require owner identity; mutations require CSRF protection',async t=>{
   const env=await setup(t),owner={userId:'owner',email:'owner@test.com'};
-  for(const path of ['/api/strategies','/api/strategies/propose','/internal/status','/internal/refresh']){const request=new Request('https://test.site'+path);assert.equal((await handleRequest(request,env,null)).status,401);assert.equal((await handleRequest(request,env,{userId:'other',email:'other@test.com'})).status,path.startsWith('/internal/')?401:403);}
+  for(const path of ['/api/strategies','/api/strategies/propose','/api/strategies/research?asset=us:AAPL','/api/strategies/finalize','/internal/status','/internal/refresh']){const request=new Request('https://test.site'+path);assert.equal((await handleRequest(request,env,null)).status,401);assert.equal((await handleRequest(request,env,{userId:'other',email:'other@test.com'})).status,path.startsWith('/internal/')?401:403);}
   const request=new Request('https://test.site/api/strategies',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.test'},body:JSON.stringify({...input,name:'evil'})});assert.equal((await handleRequest(request,env,owner)).status,403);
 });

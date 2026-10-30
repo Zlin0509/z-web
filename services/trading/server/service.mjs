@@ -63,7 +63,7 @@ export async function startPaper(db,id,options){const a=await assetById(db,id),b
 }
 async function advancePaper(db,asset,bars){
   const sessions=(await db.prepare("SELECT * FROM paper_sessions WHERE asset_id=? AND status='running'").bind(asset.id).all()).results;
-  for(const session of sessions){const data=JSON.parse(session.data),signal=targets(bars,data.config);let portfolio=data.portfolio;let missing=portfolio.lastTime<bars[0].time;
+  for(const session of sessions){const data=JSON.parse(session.data),signal=targets(bars,data.config,asset.market);let portfolio=data.portfolio;let missing=portfolio.lastTime<bars[0].time;
     if(missing){await db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE id=? AND revision=?").bind(session.id,session.revision).run();await log(db,'paper_gap',{id:session.id,message:'缺失历史 K 线，已暂停，未推测成交。'});continue;}
     for(let i=1;i<bars.length;i++)if(bars[i].time>portfolio.lastTime)portfolio=step(portfolio,bars[i],signal[i-1],data.config);
     if(portfolio.lastTime===data.portfolio.lastTime)continue;

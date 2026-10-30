@@ -1,7 +1,8 @@
+import {featureContext,marketContext,readRecord,auditData} from './research.mjs';
 import {searchStocks,rememberStock} from './catalog.mjs';
 import * as connections from './connections.mjs';
 import {authorizeSync,readQuotes,syncMarket} from './snapshots.mjs';
-import {listStrategies,saveStrategy,proposeStrategy} from './strategies.mjs';
+import {listStrategies,saveStrategy,proposeStrategy,researchHistory,finalizeResearch} from './strategies.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
 import {init,authorize,state,assetById,addAsset,removeAsset,removeAssets,importBars,runBacktest,startPaper,log} from './service.mjs';
 import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
@@ -26,6 +27,7 @@ export async function handleRequest(request,env,user){
     await init(env.DB);
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
     if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/deepseek/models','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
+    if(path==='/api/strategies/research'&&request.method==='GET')return json(await researchHistory(env,new URL(request.url).searchParams.get('asset')));
     if(path==='/api/strategies'&&request.method==='GET')return json(await listStrategies(env));
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
@@ -42,6 +44,7 @@ export async function handleRequest(request,env,user){
     if(request.method!=='POST')throw new Problem(404,'接口不存在。');
     const input=await body(request);
     if(path==='/api/strategies')return json(await saveStrategy(env,input),201);
+    if(path==='/api/strategies/finalize')return json(await finalizeResearch(env,input));
     if(path==='/api/strategies/propose')return json(await proposeStrategy(env,input));
     if(path==='/api/settings')return json(await connections.saveSettings(env,input));
     if(path==='/api/schwab/connect')return json(await connections.beginOAuth(env,user,new URL(request.url).origin));
@@ -57,7 +60,17 @@ export async function handleRequest(request,env,user){
     if(path==='/api/paper')return json({id:await startPaper(env.DB,input.assetId,input.config)},201);
     if(path==='/api/paper/stop'){const r=await env.DB.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE id=? AND status='running'").bind(String(input.id)).run();if(r.meta.changes!==1)throw new Problem(409,'策略已停止或不存在。');await log(env.DB,'paper_stopped',{id:input.id});return json({ok:true});}
     if(path==='/api/paper/stop-all'){await env.DB.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE status='running'").run();await log(env.DB,'stop_all',{execution:'paper'});return json({ok:true});}
-    if(path==='/api/analyze'){const a=await assetById(env.DB,input.assetId),bars=JSON.parse(a.data);if(bars.length<35)throw new Problem(400,'请先同步至少 35 根日线。');const asOf=bars.at(-1).time;if(Date.now()-asOf>(a.market==='crypto'?3:7)*86400000)throw new Problem(409,'数据过旧，请先刷新。');const recent=await env.DB.prepare('SELECT created FROM analyses WHERE asset_id=? ORDER BY created DESC LIMIT 1').bind(a.id).first();if(recent&&Date.now()-Date.parse(recent.created)<60000)throw new Problem(429,'请等待一分钟后再次分析。');const data=await analyze(a,{asOf,indicators:indicators(bars,a.market)},env);const id=crypto.randomUUID();await env.DB.prepare('INSERT INTO analyses(id,asset_id,created,data) VALUES (?,?,?,?)').bind(id,a.id,new Date().toISOString(),JSON.stringify({...data,asOf})).run();await log(env.DB,'analysis',{id,symbol:a.symbol,execution:'research_only'});return json(data);}
+    if(path==='/api/analyze'){
+      const a=await assetById(env.DB,input.assetId),cached=a.source==='alpaca'?await readRecord(env.DB,'research_market:'+a.id):null;
+      const bars=cached?.bars?.length>=35?cached.bars:JSON.parse(a.data),priceBasis=cached?.bars?.length>=35?'split':a.market==='crypto'?'spot':'unverified';
+      if(bars.length<35)throw new Problem(400,'请先同步至少35根日线。');
+      const asOf=bars.at(-1).time;if(Date.now()-asOf>(a.market==='crypto'?3:7)*86400000)throw new Problem(409,'数据过旧，请先更新行情入库。');
+      const recent=await env.DB.prepare('SELECT created FROM analyses WHERE asset_id=? ORDER BY created DESC LIMIT 1').bind(a.id).first();
+      if(recent&&Date.now()-Date.parse(recent.created)<60000)throw new Problem(429,'请等待一分钟后再次分析。');
+      const data=await analyze(a,{asOf,priceBasis,dataQuality:auditData(bars,a.market,priceBasis),indicators:indicators(bars,a.market),features:featureContext(bars,{fast:10,slow:30},a.market),marketEvidence:await marketContext(env.DB,a,bars)},env);
+      const id=crypto.randomUUID();await env.DB.prepare('INSERT INTO analyses(id,asset_id,created,data) VALUES (?,?,?,?)').bind(id,a.id,new Date().toISOString(),JSON.stringify({...data,asOf,priceBasis})).run();
+      await log(env.DB,'analysis',{id,symbol:a.symbol,execution:'research_only'});return json(data);
+    }
     if(path==='/api/okx/check')return json(await okxAccount(env));
     if(path==='/api/orders')return executeLiveOrder();
     throw new Problem(404,'接口不存在。');
