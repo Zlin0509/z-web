@@ -1,7 +1,8 @@
 import * as connections from './connections.mjs';
+import {authorizeSync,readQuotes,syncMarket} from './snapshots.mjs';
 import {listStrategies,saveStrategy,proposeStrategy} from './strategies.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
-import {init,authorize,state,assetById,addAsset,removeAsset,importBars,runBacktest,startPaper,refresh,log} from './service.mjs';
+import {init,authorize,state,assetById,addAsset,removeAsset,importBars,runBacktest,startPaper,log} from './service.mjs';
 import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
 import {page,login} from '../ui/page.mjs';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'same-origin'};
@@ -15,23 +16,25 @@ export async function handleRequest(request,env,user){
     if(!env.DB)throw new Problem(503,'交易数据库暂不可用。');
     // The audience can change outside the application. Never expose internal data
     // or mutations solely on the assumption of a private platform boundary.
-    if(path.startsWith('/internal/')){if(!user)throw new Problem(401,'后台接口需要站点所有者登录。');await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);}
-    if(path==='/internal/refresh'&&request.method==='POST'){if(request.headers.get('origin')||request.headers.get('x-trading-service')!=='1')throw new Problem(403,'仅支持服务端调度。');await init(env.DB);return json(await refresh(env.DB,await connections.configured(env)));}
-    if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);const snapshot=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();return json({assets:s.assets,events:s.events.slice(0,2),quoteSnapshot:snapshot?JSON.parse(snapshot.value):null});}
+    if(path.startsWith('/internal/')){await authorizeSync(request,env);}
+    if(path==='/internal/refresh'&&request.method==='POST'){if(request.headers.get('origin')||request.headers.get('x-trading-service')!=='1')throw new Problem(403,'仅支持服务端调度。');await init(env.DB);return json(await syncMarket(env));}
+    if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);const snapshot=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();const archiveCount=await env.DB.prepare("SELECT count(*) AS n FROM service_state WHERE key LIKE 'history:%'").first();return json({assets:s.assets,historyArchives:archiveCount.n,events:s.events.slice(0,2),quoteSnapshot:snapshot?JSON.parse(snapshot.value):null});}
     if(!user){if(path==='/')return html(login());throw new Problem(401,'请先登录交易研究室。');}
     await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);
     if(path==='/'&&request.method==='GET')return html(page());
     await init(env.DB);
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
-    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/state','/api/deepseek/models','/api/quotes','/api/refresh','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
+    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/deepseek/models','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
     if(path==='/api/strategies'&&request.method==='GET')return json(await listStrategies(env));
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
-    if(path==='/api/quotes'&&request.method==='GET'){const cached=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();if(cached&&Date.now()-JSON.parse(cached.value).time<15000)return json(JSON.parse(cached.value).data);const data=await connections.quotes(env);await env.DB.prepare("INSERT INTO service_state(key,value) VALUES('quotes_cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({time:Date.now(),data})).run();return json(data);}
+    if(path==='/api/quotes'&&request.method==='GET')return json(await readQuotes(env));
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
-    if(path==='/api/state'&&request.method==='GET')return json(await state(env.DB,env));
+    if(path==='/api/state'&&request.method==='GET'){const status=await connections.settings(env);return json(await state(env.DB,{...env,...status.configured,DEEPSEEK_MODEL:status.model},new URL(request.url).searchParams.get('asset')));}
     const assetMatch=path.match(/^\/api\/assets\/([^/]+)$/);
     if(assetMatch&&request.method==='GET'){const a=await assetById(env.DB,decodeURIComponent(assetMatch[1]));return json({...a,data:JSON.parse(a.data)});}
+    const detailMatch=path.match(/^\/api\/runs\/([^/]+)$/);
+    if(detailMatch&&request.method==='GET'){const row=await env.DB.prepare('SELECT * FROM backtests WHERE id=?').bind(detailMatch[1]).first();if(!row)throw new Problem(404,'回测不存在。');return json({...row,result:JSON.parse(row.result)});}
     const runMatch=path.match(/^\/api\/runs\/([^/]+)\/export$/);
     if(runMatch&&request.method==='GET'){const run=await env.DB.prepare('SELECT * FROM backtests WHERE id=?').bind(runMatch[1]).first();if(!run)throw new Problem(404,'回测不存在。');return new Response(run.result,{headers:{...headers,'Content-Type':'application/json','Content-Disposition':'attachment; filename="backtest.json"'}});}
     if(request.method!=='POST')throw new Problem(404,'接口不存在。');
@@ -47,7 +50,7 @@ export async function handleRequest(request,env,user){
     if(path==='/api/assets/remove')return json(await removeAsset(env.DB,input.assetId,input.revision));
     if(path==='/api/assets'){await addAsset(env.DB,input);return json({ok:true},201);}
     if(path==='/api/import'){await importBars(env.DB,input.assetId,parseCSV(input.csv),input.revision);return json({ok:true});}
-    if(path==='/api/refresh')return json(await refresh(env.DB,env,input.assetId??null));
+    if(path==='/api/refresh')return json(await syncMarket(env,input.assetId??null));
     if(path==='/api/backtest')return json(await runBacktest(env.DB,input.assetId,input.config),201);
     if(path==='/api/paper')return json({id:await startPaper(env.DB,input.assetId,input.config)},201);
     if(path==='/api/paper/stop'){const r=await env.DB.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE id=? AND status='running'").bind(String(input.id)).run();if(r.meta.changes!==1)throw new Problem(409,'策略已停止或不存在。');await log(env.DB,'paper_stopped',{id:input.id});return json({ok:true});}

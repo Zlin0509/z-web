@@ -1,17 +1,13 @@
 import {test,expect} from '@playwright/test';
 
-test('owner can save secrets without reading them back and sees streamed quote timestamps',async({page},info)=>{
+test('owner can save secrets without reading them back and sees persisted quote timestamps',async({page},info)=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const modelId='available-model-'+info.project.name+'-'+Date.now();let modelError=false;
   await page.route('**/api/deepseek/models',r=>r.fulfill(modelError?{status:502,json:{error:'上游暂时不可用'}}:{json:{models:[{id:modelId,name:'账号可用模型'},{id:'another-model',name:'另一模型'}]}}));
-  await page.route('**/api/quotes',r=>r.fulfill({json:{quotes:[{symbol:'BTC-USDT',error:'REST limited'},{symbol:'AAPL',error:'请配置 Alpaca'}]}}));
-  await page.routeWebSocket('wss://ws.okx.com:8443/ws/v5/public',ws=>ws.onMessage(message=>{
-    if(message==='ping')return ws.send('pong');
-    ws.send(JSON.stringify({data:[{instId:'BTC-USDT',last:'65432',bidPx:'65431',askPx:'65433',ts:String(Date.now())}]}));
-  }));
+  await page.route('**/api/quotes',r=>r.fulfill({json:{quotes:[{symbol:'BTC-USDT',last:65432,time:new Date().toISOString(),source:'OKX · 定时快照'},{symbol:'AAPL',error:'请配置 Alpaca'}],fetchedAt:new Date().toISOString()}}));
   await page.goto('/');await page.getByRole('link',{name:'使用 ChatGPT 登录'}).click();
   await expect(page.locator('#live-quotes')).toContainText('65432');
-  await expect(page.locator('#live-quotes')).toContainText('OKX WebSocket');
+  await expect(page.locator('#live-quotes')).toContainText('OKX · 定时快照');
   await page.locator('[data-tab="integrations"]').click();
   const secret='ui-test-only-secret';
   await page.locator('[name="DEEPSEEK_API_KEY"]').fill(secret);

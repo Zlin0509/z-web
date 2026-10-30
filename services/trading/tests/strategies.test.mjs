@@ -60,6 +60,6 @@ test('invalid AI output is not saved and insufficient data avoids external calls
 });
 test('strategy and internal endpoints require owner identity; mutations require CSRF protection',async t=>{
   const env=await setup(t),owner={userId:'owner',email:'owner@test.com'};
-  for(const path of ['/api/strategies','/api/strategies/propose','/internal/status','/internal/refresh']){const request=new Request('https://test.site'+path);assert.equal((await handleRequest(request,env,null)).status,401);assert.equal((await handleRequest(request,env,{userId:'other',email:'other@test.com'})).status,403);}
+  for(const path of ['/api/strategies','/api/strategies/propose','/internal/status','/internal/refresh']){const request=new Request('https://test.site'+path);assert.equal((await handleRequest(request,env,null)).status,401);assert.equal((await handleRequest(request,env,{userId:'other',email:'other@test.com'})).status,path.startsWith('/internal/')?401:403);}
   const request=new Request('https://test.site/api/strategies',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.test'},body:JSON.stringify({...input,name:'evil'})});assert.equal((await handleRequest(request,env,owner)).status,403);
 });

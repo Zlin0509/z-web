@@ -9,14 +9,14 @@ export function marketSource(asset,env){return asset.source==='csv'?'csv':asset.
 export async function loadMarket(asset,env,fetcher=fetch) {
   if(asset.source==='csv')throw new Problem(409,'CSV 数据通过文件更新，不进行联网刷新。');
   if(asset.market==='crypto') {
-    const url=new URL('https://www.okx.com/api/v5/market/candles');url.search=new URLSearchParams({instId:asset.symbol,bar:'1Dutc',limit:'300'});
+    const url=new URL('https://www.okx.com/api/v5/market/candles');url.search=new URLSearchParams({instId:asset.symbol,bar:'1Dutc',limit:String(asset.since?Math.min(300,Math.max(3,Math.ceil((Date.now()-asset.since)/86400000)+2)):300)});
       const data=await getJSON(url.toString(),{},fetcher,env);if(data.code!=='0'||!Array.isArray(data.data))throw new Problem(502,'OKX 行情接口暂不可用或交易对不存在。');
     return normalizeBars(data.data.filter(x=>x[8]==='1'&&Number(x[0])+86400000<=Date.now()).map(x=>({time:Number(x[0]),open:Number(x[1]),high:Number(x[2]),low:Number(x[3]),close:Number(x[4]),volume:Number(x[5])})));
   }
     if(marketSource(asset,env)==='alpaca'){
       const dayFormat=new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York'}),today=dayFormat.format(new Date());
       const url=new URL('https://data.alpaca.markets/v2/stocks/'+encodeURIComponent(asset.symbol)+'/bars');
-      url.search=new URLSearchParams({timeframe:'1Day',feed:'iex',adjustment:'raw',sort:'asc',limit:'1000',start:new Date(Date.now()-550*86400000).toISOString(),end:today+'T00:00:00Z'});
+      url.search=new URLSearchParams({timeframe:'1Day',feed:'iex',adjustment:'raw',sort:'asc',limit:'1000',start:new Date(asset.since?asset.since-3*86400000:Date.now()-550*86400000).toISOString(),end:today+'T00:00:00Z'});
       const rows=[];let page=0;
       for(;;){
         const data=await getJSON(url,{headers:{'APCA-API-KEY-ID':env.ALPACA_API_KEY,'APCA-API-SECRET-KEY':env.ALPACA_SECRET_KEY}},fetcher,env);
@@ -26,6 +26,7 @@ export async function loadMarket(asset,env,fetcher=fetch) {
         url.searchParams.set('page_token',data.next_page_token);
       }
       const completed=rows.map(x=>({...x,date:dayFormat.format(new Date(x.t))})).filter(x=>x.date<today);
+      if(!completed.length&&asset.since)return [];
       if(!completed.length)throw new Problem(404,'该标的在 Alpaca IEX 暂无已完成日线。');
       return normalizeBars(completed.map(x=>({time:Date.parse(x.date),open:x.o,high:x.h,low:x.l,close:x.c,volume:x.v})));
     }

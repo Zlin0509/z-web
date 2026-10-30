@@ -19,11 +19,17 @@ Node >=22.13。在本目录执行 `npm ci`、`npm run dev -- --port 4322`。本�
 
 构建：`npm run build`。本地 D1 初始化：构建后执行 `node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_*.sql`，替换通配符为实际迁移名，且仅执行未应用迁移。生产由 Sites 在部署时应用迁移。
 
-## 行情更新与后台认证
+## 数据库展示与定时同步
 
-站点当前为公开入口，交易数据、编辑和配置仍需要所有者账号登录。`/internal/status` 与 `/internal/refresh` 现在同样校验所有者身份；Sites 的无用户身份 bypass token 不能再调用它们。原先依赖 owner-private 边界的每日云任务因此需要重新配置认证，暂不能自动同步；登录后可通过页面「同步行情」更新。
+页面行情读取只访问服务端 D1 数据库，不调用行情供应商，不开启 WebSocket、不进行15秒报价轮询或60秒页面重载。`/api/state?asset=...` 一次返回列表与选中标的日线；同一页面按 revision 复用标的日线。回测列表只返回摘要，完整曲线和交易通过 `/api/runs/:id` 按需加载。「读取数据库」仅重新读取持久数据，「更新行情入库」才触发写入同步。
 
-数据库使用五分钟同步租约和版本比较；API 失败保留旧数据并显示错误。配置 Alpaca 后，美股优先取过去550天的 IEX 未复权日线，排除纽约当天；没有 Alpaca 时使用 Alpha Vantage。CSV 资产不自动刷新。
+报价每5分钟在后台采集一次：所有美股合并为一次 Alpaca IEX 请求，虚拟币合并为一次 OKX SPOT tickers 请求。接口故障保留上次成功值和原始行情时间，显示错误；重复任务用租约和290秒缓存阻止重复采集。报价是定时快照，并非逐笔实时数据。
+
+完整日线单独更新：虚拟币已有昨天的完整 UTC 日线时不请求；美股成功检查后6小时内复用数据库，休市也避免每5分钟重复拉取。Alpaca 首次取550天，后续从最新日线向前重叠3天；OKX 根据缺口缩小请求条数。历史以标的、来源、年份归档到 service_state 的 `history:*` 记录，按时间去重和修订；图表/回测活跃窗口保留最近2000根，旧数据继续留在年度归档。来源切换保留原来源归档，避免混合复权口径。
+
+站点保留公开入口，业务 API 仍要求所有者登录。后台 `/internal/refresh` 和 `/internal/status` 使用独立 HMAC-SHA256 同步凭证，签名绑定时间、方法与路径，5分钟过期；拒绝浏览器 Origin。平台 bypass token 本身无写入权限。同步凭证不能访问账户、策略编辑或订单 API。
+
+运行器：`scripts/sync-market.py --config /home/zlin/.config/zlin-trading/sync.json`。配置文件0600，凭证通过 curl 标准输入传递，不进入 Git、命令行或日志；服务端秘密名 TRADING_SYNC_SECRET。部署后使用当前服务器的用户 crontab 每5分钟执行一次，flock 防止重叠。最近结果保存在同目录 last-status.json。此计划依赖服务器和 cron 在线，重启后继续；原 Sites 每日任务缺少新签名凭证，不作为同步路径，当前工具无法修改它。
 
 ## 回测口径
 
@@ -43,7 +49,7 @@ OKX 账户 Key / Secret / Passphrase 和 DeepSeek Key / Model 通过服务端秘
 
 登录后进入「服务接入」，下方「密钥配置与 Schwab 账户」可填写 DeepSeek API Key、Alpaca Key ID/Secret、Schwab App Key/Secret。密钥在服务端用 AES-256-GCM 加密存入 D1，主密钥 CONFIG_ENCRYPTION_KEY 保存在 Sites secrets；配置接口只返回已配置状态，输入空白保留旧值。切勿直接轮换主密钥，否则旧配置无法解密。
 
-最新报价独立于回测日线：OKX 使用浏览器公共 WebSocket，不再重复轮询 OKX REST 快照；美股使用 Alpaca IEX 最新买卖报价，每15秒轮询，明确标注单交易所覆盖和时间。市场休市、缺少权限或限流不会显示为实时成功。日线指标与模拟任务仍按日线处理，不用实时价替代历史收盘价。
+最新报价和回测日线分别保存于数据库；页面只读取快照，后台批量刷新，明确标注来源与行情时间。日线指标和模拟策略仍使用完整日线，不用报价替代历史收盘价。
 
 Schwab 回调地址为 `https://zlin-trading-lab.zlin20050509.chatgpt.site/schwab/callback`。注册应用需要 Accounts and Trading Production；Market Data Production 可按需申请，本版美股报价使用 Alpaca。网页通过顶层 OAuth 授权，服务端加密保存和刷新令牌；失效后需重新授权。支持账户/持仓/近7日订单读取、普通时段DAY股票整股限价单预览与提交、撤单。单笔最多1000 USD；预览60秒过期，提交一次性领取，超时结果未知时不自动重发。
 
@@ -70,3 +76,18 @@ DeepSeek 模型选择：保存 API Key 后自动调用官方 GET /models 获取�
 AI 不能提高仓位和回撤停机上限，不能改掉手续费、滑点或初始资金。方案须点击「应用到下方编辑器」后才能修改、回测、保存或手动启动模拟；生成本身不下单。保存会创建不可变版本，可重新载入，并通过 parentId 记录同标的版本关系。生成记录也保存在 service_state；API 密钥不会写入策略记录。
 
 新增接口（所有者登录；POST 另需同源 Origin 与 X-Trading-Request）：GET/POST `/api/strategies`、POST `/api/strategies/propose`。生成使用100秒租约和完成后15秒冷却；外部请求超时90秒，失败不会自动重试。仅支持日线、多头、无杠杆的回测与模拟。
+
+## 自动交易接入方案
+
+现状：规则引擎、策略版本、回测和本地模拟组合已具备；后台同步会推进用户已启动的模拟策略。Schwab 有人工预览/提交/撤单接口但实盘开关关闭；OKX 只有只读账户检查；Alpaca 目前仅用于行情。自动交易执行器尚未接入。
+
+建议下一阶段先接 Alpaca Paper 和 OKX Demo：固定策略版本 → 完整行情/时钟检查 → 持仓与余额对账 → 确定目标仓位 → 风控限制 → 持久订单意图 → 提交 → 查单/成交回报 → 更新订单与持仓。信号键为策略版本、标的、K线时间与方向，数据库唯一约束保证同一信号只产生一个意图；请求超时转为 unknown 并查单，不能盲目重发。
+
+- Alpaca 使用纸面账户独立域名和 client_order_id，配合账户/订单查询或 trade_updates；当前已保存的是 Paper Key，可在实现执行器后完成纸面联调。
+- OKX 使用独立 Demo Key、Secret、Passphrase 和 x-simulated-trading: 1；根据产品精度、最小数量处理现货订单，clOrdId 在本数据库永久唯一。实盘 Key 还需后续提供和授权。
+- 执行前检查行情新鲜度、余额、交易时段、价差、最小下单额、最大仓位与每日亏损；异常时停止新单并保留对账任务。
+- AI 负责生成/优化候选策略，经过验证、保存并激活版本后才交给确定性执行器。不能用一次不受约束的模型回复直接拼订单。
+
+定时5分钟行情快照适合当前研究界面；实际交易信号触发时仍须获取新鲜行情/账户状态，行情缓存与交易执行不能共用“永不请求”的规则。日线回测中的历史次日开盘成交只是模拟假设；自动交易须改为信号形成后在真实可交易时段提交，记录实际成交。
+
+官方参考：[Alpaca Paper Trading](https://docs.alpaca.markets/docs/paper-trading) · [Alpaca Client Order ID](https://docs.alpaca.markets/us/v1.4.2/reference/getorderbyclientorderid) · [OKX API / Demo Trading](https://www.okx.com/docs-v5/en/)。

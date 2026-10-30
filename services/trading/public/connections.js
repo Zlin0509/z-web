@@ -1,27 +1,5 @@
 (()=>{
-const view=document.querySelector('#view');if(!view)return;let active=false,quoteBusy=false,socket=null,retryAt=0,subscribed="";const live=new Map();
-function stream(symbols){
-  const signature=[...symbols].sort().join(',');
-  const args=items=>items.filter(Boolean).map(instId=>({channel:'tickers',instId}));
-  if(socket){
-    if(subscribed!==signature&&socket.readyState===1){socket.send(JSON.stringify({op:'unsubscribe',args:args(subscribed.split(','))}));socket.send(JSON.stringify({op:'subscribe',args:args(symbols)}));}
-    subscribed=signature;return;
-  }
-  if(Date.now()<retryAt||document.hidden||!symbols.length)return;
-  subscribed=signature;socket=new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
-  socket.onopen=()=>socket.send(JSON.stringify({op:'subscribe',args:args(subscribed.split(','))}));
-  socket.onmessage=ev=>{if(ev.data==='pong')return;try{
-    const j=JSON.parse(ev.data);for(const q of j.data||[]){
-      if(!subscribed.split(',').includes(q.instId)||!Number.isFinite(Number(q.last))||!Number.isFinite(Number(q.ts)))continue;
-      const value={symbol:q.instId,last:Number(q.last),bid:Number(q.bidPx)||null,ask:Number(q.askPx)||null,time:new Date(Number(q.ts)).toISOString(),source:'OKX WebSocket',error:null};live.set(q.instId,value);
-      const row=[...document.querySelectorAll('#live-quotes tr[data-symbol]')].find(r=>r.dataset.symbol===q.instId);
-      if(row)[value.last,value.bid??'—',value.ask??'—',new Date(value.time).toLocaleString('zh-CN')+' · 推送',value.source].forEach((v,i)=>row.children[i+1].textContent=v);
-    }
-  }catch{}};
-  socket.onerror=()=>socket?.close();socket.onclose=()=>{socket=null;retryAt=Date.now()+30000;};
-}
-setInterval(()=>{if(socket?.readyState===1)socket.send('ping');},20000);
-document.addEventListener('visibilitychange',()=>{if(document.hidden){socket?.close();live.clear();}});
+const view=document.querySelector('#view');if(!view)return;let active=false,quoteBusy=false,quoteSnapshot=null;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function call(path,data){const r=await fetch('/api'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Trading-Request':'1'},body:data===undefined?undefined:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j;}
 // Only non-sensitive presence flags and model IDs are kept in page memory.
@@ -82,7 +60,8 @@ box.querySelector('#query-orders').onclick=guarded(async()=>{const r=await call(
 box.querySelector('#cancel-order').onsubmit=guarded(async()=>{const r=await call('/schwab/cancel',{account:box.querySelector('[name="account"]').value,orderId:box.querySelector('[name="orderId"]').value,confirm:'CANCEL_LIVE_ORDER'});message(JSON.stringify(r));});
 status().catch(e=>message(e.message));
 }
-if(view.querySelector('.watchlist')&&!document.querySelector('#live-quotes')){const box=document.createElement('section');box.id='live-quotes';box.className='panel lower';box.innerHTML='<div class="section-head"><h2>最新市场报价</h2><span class="tag">每 15 秒刷新</span></div><p class="quiet">正在获取…</p>';view.prepend(box);stream([...view.querySelectorAll('[data-asset^="crypto:"]')].map(x=>x.dataset.asset.slice(7)));updateQuotes();}}
-async function updateQuotes(){const box=document.querySelector('#live-quotes');if(!box||document.hidden||quoteBusy)return;quoteBusy=true;try{const r=await call('/quotes');stream(r.quotes.filter(q=>q.symbol.endsWith('-USDT')).map(q=>q.symbol));r.quotes=r.quotes.map(q=>{const value=live.get(q.symbol);return value&&Date.now()-Date.parse(value.time)<60000?value:q;});box.innerHTML=`<div class="section-head"><h2>最新市场报价</h2><span class="tag">加密资产推送 · 美股 15 秒轮询</span></div><div class="table-wrap"><table><thead><tr><th>标的</th><th>最新成交</th><th>买价</th><th>卖价</th><th>报价时间 / 状态</th><th>来源</th></tr></thead><tbody>${r.quotes.map(q=>{const age=q.time?Date.now()-Date.parse(q.time):Infinity;return `<tr data-symbol="${escape(q.symbol)}"><td>${escape(q.symbol)}</td><td>${escape(q.last??'—')}</td><td>${escape(q.bid??'—')}</td><td>${escape(q.ask??'—')}</td><td>${escape(q.error||(new Date(q.time).toLocaleString('zh-CN')+(age>60000?' · 旧报价/休市':' · 最新'))) }</td><td>${escape(q.source??'—')}</td></tr>`;}).join('')}</tbody></table></div><p class="quiet">美股使用免费 IEX 单一交易所报价；休市或无成交时可能保留旧报价。下方图表和指标仍使用已完成日线，模拟策略仍按日线运行。</p>`;}catch(e){box.querySelector('.quiet').textContent=e.message;}finally{quoteBusy=false;}}
-new MutationObserver(m=>{if(m.some(x=>x.target===view))mount();}).observe(view,{childList:true});mount();setInterval(updateQuotes,15000);
+if(view.querySelector('.watchlist')&&!document.querySelector('#live-quotes')){const box=document.createElement('section');box.id='live-quotes';box.className='panel lower';box.innerHTML='<div class="section-head"><h2>数据库报价快照</h2><span class="tag">数据库快照</span></div><p class="quiet">正在获取…</p>';view.prepend(box);updateQuotes();}}
+async function updateQuotes(){const box=document.querySelector('#live-quotes');if(!box||document.hidden||quoteBusy)return;quoteBusy=true;try{const r=quoteSnapshot||(quoteSnapshot=await call('/quotes'));box.innerHTML=`<div class="section-head"><h2>数据库报价快照</h2><span class="tag">${escape(r.fetchedAt?'入库于 '+new Date(r.fetchedAt).toLocaleString('zh-CN'):'等待后台入库')}</span></div><div class="table-wrap"><table><thead><tr><th>标的</th><th>最新成交</th><th>买价</th><th>卖价</th><th>报价时间 / 状态</th><th>来源</th></tr></thead><tbody>${r.quotes.map(q=>{const age=q.time?Date.now()-Date.parse(q.time):Infinity;return `<tr data-symbol="${escape(q.symbol)}"><td>${escape(q.symbol)}</td><td>${escape(q.last??'—')}</td><td>${escape(q.bid??'—')}</td><td>${escape(q.ask??'—')}</td><td>${escape(q.error||(new Date(q.time).toLocaleString('zh-CN')+(age>60000?' · 旧报价/休市':' · 最新'))) }</td><td>${escape(q.source??'—')}</td></tr>`;}).join('')}</tbody></table></div><p class="quiet">美股使用免费 IEX 单一交易所报价；休市或无成交时可能保留旧报价。页面只读取数据库，不直连行情源；后台每5分钟采集报价，日线独立按需更新。</p>`;}catch(e){box.querySelector('.quiet').textContent=e.message;}finally{quoteBusy=false;if(document.querySelector('#live-quotes')&&document.querySelector('#live-quotes')!==box)void updateQuotes();}}
+window.addEventListener('trading:database',()=>{quoteSnapshot=null;void updateQuotes();});
+new MutationObserver(m=>{if(m.some(x=>x.target===view))mount();}).observe(view,{childList:true});mount();
 })();

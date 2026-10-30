@@ -5,7 +5,8 @@ import {readFileSync} from 'node:fs';
 import {indicators,sma,ema,rsi,parseCSV,backtest,config,step,startPortfolio} from '../server/engine.mjs';
 import {handleRequest} from '../server/controller.mjs';
 import {loadMarket,analyze,okxAccount} from '../server/providers.mjs';
-import {refresh} from '../server/service.mjs';
+import {refresh,archiveBars} from '../server/service.mjs';
+import {authorizeSync,refreshQuotes} from '../server/snapshots.mjs';
 import {quotes} from '../server/connections.mjs';
 const day=86400000;
 const bars=(n=100)=>Array.from({length:n},(_,i)=>({time:Math.floor(Date.now()/day)*day-(n-i)*day,open:100+i*.5,close:100+i*.5,high:102+i*.5,low:98+i*.5,volume:1000}));
@@ -89,4 +90,38 @@ test('removing a watched asset stops its simulations, retains historical results
   assert.equal((await call(en,'/api/assets/'+encodeURIComponent(asset.id))).status,404);
   assert.equal((await call(en,'/api/assets',{data:{market:'crypto',symbol:'BTC-USDT'}})).status,201);
   assert.equal((await(await call(en,'/api/state')).json()).sessions[0].status,'stopped');
+});
+
+
+test('database reads never call providers, even when the quote snapshot is old',async t=>{
+  const en=env(t);await call(en,'/api/state');const history=bars();
+  await en.DB.prepare("UPDATE assets SET data=? WHERE id='us:AAPL'").bind(JSON.stringify(history)).run();
+  const snapshot={time:1,data:{quotes:[{symbol:'AAPL',bid:123,time:'2025-01-01T00:00:00Z'}],fetchedAt:'2025-01-01T00:00:00Z'}};
+  await en.DB.prepare("INSERT INTO service_state(key,value) VALUES('quotes_cache',?)").bind(JSON.stringify(snapshot)).run();
+  t.mock.method(globalThis,'fetch',()=>{throw Error('read must not call providers');});
+  assert.equal((await call(en,'/api/backtest',{data:{assetId:'us:AAPL',config:{}}})).status,201);
+  const state=await(await call(en,'/api/state?asset=us:AAPL')).json();assert.deepEqual(state.selectedAsset.data,history);assert.equal(state.runs[0].result.curve,undefined);
+  const full=await(await call(en,'/api/runs/'+state.runs[0].id)).json();assert.ok(full.result.curve.length>0);
+  for(let i=0;i<3;i++){const r=await(await call(en,'/api/quotes')).json();assert.equal(r.quotes.find(q=>q.symbol==='AAPL').bid,123);assert.equal(r.fetchedAt,snapshot.data.fetchedAt);}
+});
+
+test('scheduled signatures expire and bind the exact method and path',async()=>{
+  const en={TRADING_SYNC_SECRET:'test-sync-key'},stamp=String(Date.now()),path='/internal/refresh';
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(en.TRADING_SYNC_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const signature=Buffer.from(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(stamp+'\nPOST\n'+path))).toString('hex');
+  const headers={'x-sync-time':stamp,'x-sync-signature':signature};
+  await authorizeSync(new Request('https://test'+path,{method:'POST',headers}),en);
+  for(const request of [new Request('https://test'+path,{headers}),new Request('https://test/internal/status',{method:'POST',headers}),new Request('https://test'+path,{method:'POST',headers:{...headers,origin:'https://evil'}}),new Request('https://test'+path,{method:'POST',headers:{...headers,'x-sync-time':String(Date.now()-600000)}})])await assert.rejects(()=>authorizeSync(request,en),e=>e.status===401);
+});
+
+test('year archives retain historical data and isolate provider changes',async t=>{
+  const en=env(t),history=bars();await archiveBars(en.DB,'us:AAPL','alpaca',history);await archiveBars(en.DB,'us:AAPL','alpaca',[{...history.at(-1),close:999}]);await archiveBars(en.DB,'us:AAPL','csv',[history[0]]);
+  const rows=en.DB.prepare("SELECT key,value FROM service_state WHERE key LIKE 'history:us:AAPL:alpaca:%'").all().results,all=rows.flatMap(r=>JSON.parse(r.value)).sort((a,b)=>a.time-b.time);assert.equal(all.length,history.length);assert.equal(all.at(-1).close,999);assert.equal(all[0].close,history[0].close);
+});
+
+test('background quote snapshots batch symbols, retain last good values on errors and throttle duplicate runs',async t=>{
+  const en={...env(t),ALPACA_API_KEY:'test',ALPACA_SECRET_KEY:'test'};await call(en,'/api/state');let calls=0,fail=false,clock=Date.now();t.mock.method(Date,'now',()=>clock);
+  t.mock.method(globalThis,'fetch',async url=>{calls++;if(fail)return new Response('',{status:429});return String(url).includes('alpaca')?Response.json({quotes:{AAPL:{bp:123,ap:124,t:new Date().toISOString()},SPY:{bp:400,ap:401,t:new Date().toISOString()}}}):Response.json({code:'0',data:['BTC-USDT','ETH-USDT'].map(instId=>({instId,last:'100',bidPx:'99',askPx:'101',ts:String(clock)}))});});
+  await refreshQuotes(en);assert.equal(calls,2);await refreshQuotes(en);assert.equal(calls,2);
+  clock+=300001;fail=true;const result=await refreshQuotes(en);assert.equal(calls,4);assert.equal(result.quotes.find(q=>q.symbol==='AAPL').bid,123);assert.ok(result.quotes.every(q=>q.error));
 });

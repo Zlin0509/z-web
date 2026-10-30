@@ -17,15 +17,16 @@ export async function authorize(db,user,email){
 }
 export async function assetById(db,id){const a=await db.prepare('SELECT * FROM assets WHERE id=?').bind(id).first();if(!a)throw new Problem(404,'没有找到这个标的。');return a;}
 export function describe(a){const bars=JSON.parse(a.data);return {...a,data:undefined,bars:bars.length,asOf:bars.at(-1)?.time??null,indicators:bars.length?indicators(bars,a.market):null};}
-export async function state(db,env){
+export async function state(db,env,selected=null){
   const [assets,runs,sessions,events,analyses]=await Promise.all([
     db.prepare('SELECT * FROM assets ORDER BY market,symbol').all(),
-    db.prepare('SELECT id,asset_id,created,result FROM backtests ORDER BY created DESC LIMIT 30').all(),
+    db.prepare("SELECT id,asset_id,created,json_remove(result,'$.curve','$.benchmark','$.trades') AS result FROM backtests ORDER BY created DESC LIMIT 30").all(),
     db.prepare('SELECT * FROM paper_sessions ORDER BY created DESC LIMIT 30').all(),
     db.prepare('SELECT * FROM events ORDER BY created DESC LIMIT 40').all(),
     db.prepare('SELECT * FROM analyses ORDER BY created DESC LIMIT 20').all()
   ]);
-  return {assets:assets.results.map(describe),runs:runs.results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:sessions.results.map(r=>({...r,data:JSON.parse(r.data)})),events:events.results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:analyses.results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!(env.ALPHA_VANTAGE_API_KEY||(env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY)),okxAccount:!!(env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
+  const chosen=selected?(assets.results.find(a=>a.id===selected)||assets.results[0]):null;
+  return {...(selected?{selectedAsset:chosen?{...chosen,data:JSON.parse(chosen.data)}:null}:{}),assets:assets.results.map(describe),runs:runs.results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:sessions.results.map(r=>({...r,data:JSON.parse(r.data)})),events:events.results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:analyses.results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!(env.ALPHA_VANTAGE_API_KEY||(env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY)),okxAccount:!!(env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
 }
 export async function addAsset(db,input){
   const {market}=input,symbol=String(input.symbol??'').trim().toUpperCase();const source=input.source??(market==='crypto'?'okx':'alpha');
@@ -38,8 +39,7 @@ export async function removeAsset(db,id,revision){
   const asset=await assetById(db,id);if(!Number.isInteger(revision))throw new Problem(400,'缺少标的版本号，请刷新后再试。');
   const result=await db.batch([
     db.prepare('DELETE FROM assets WHERE id=? AND revision=?').bind(id,revision),
-    db.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id=? AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id),
-    db.prepare("DELETE FROM service_state WHERE key='quotes_cache'")
+    db.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id=? AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id)
   ]);
   if(result[0].meta.changes!==1)throw new Problem(409,'标的数据已更新，请刷新后再删除。');
   await log(db,'asset_removed',{symbol:asset.symbol,stopped:result[1].meta.changes,history:'retained'});
@@ -61,6 +61,10 @@ async function advancePaper(db,asset,bars){
     const r=await db.prepare('UPDATE paper_sessions SET data=?,status=?,revision=revision+1 WHERE id=? AND revision=?').bind(JSON.stringify(data),portfolio.halted?'halted':'running',session.id,session.revision).run();if(r.meta.changes===1)await log(db,'paper_advanced',{id:session.id,orders:newOrders,mode:'paper',halted:portfolio.halted});
   }
 }
+export async function archiveBars(db,id,source,bars){
+  const years=new Map();for(const bar of bars){const year=new Date(bar.time).getUTCFullYear();if(!years.has(year))years.set(year,[]);years.get(year).push(bar);}
+  for(const [year,items] of years){const key='history:'+id+':'+source+':'+year,row=await db.prepare('SELECT value FROM service_state WHERE key=?').bind(key).first();const saved=row?JSON.parse(row.value):[];const merged=[...new Map([...saved,...items].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time);const value=JSON.stringify(merged);if(row?.value===value)continue;await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key,value).run();}
+}
 export async function refresh(db,env,id=null,fetcher=fetch){
   const lease=crypto.randomUUID(),expires=Date.now()+300000;
   const locked=await db.prepare("INSERT INTO service_state(key,value) VALUES('refresh_lock',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(json_extract(service_state.value,'$.expires') AS INTEGER)<?").bind(JSON.stringify({lease,expires}),Date.now()).run();
@@ -70,16 +74,20 @@ export async function refresh(db,env,id=null,fetcher=fetch){
     for(const asset of assets){try{
       const old=JSON.parse(asset.data),latest=old.at(-1)?.time,source=marketSource(asset,env),changed=source!==asset.source;
       const currentDay=Math.floor(Date.now()/86400000)*86400000;
-      const cached=!changed&&asset.source!=='csv'&&old.length>0&&(asset.market==='crypto'?latest>=currentDay-86400000:Date.now()-Date.parse(asset.updated)<900000);
+        const checkpoint=await db.prepare('SELECT value FROM service_state WHERE key=?').bind('daily_check:'+asset.id).first();const checked=checkpoint?JSON.parse(checkpoint.value):null;
+      const cached=!changed&&asset.source!=='csv'&&old.length>0&&(asset.market==='crypto'?latest>=currentDay-86400000:(checked?.source===source&&Date.now()-checked.time<21600000)||Date.now()-Date.parse(asset.updated)<21600000);
       if(cached){
         await advancePaper(db,asset,old);
         await db.prepare("UPDATE assets SET status='ready',message=NULL WHERE id=? AND revision=?").bind(asset.id,asset.revision).run();
         report.push({symbol:asset.symbol,status:'cached',bars:old.length,message:'已复用最新完整日线，无需重复请求。'});continue;
       }
-      const incoming=await loadMarket(asset,{...env,DB:db},fetcher),merged=[...new Map([...(changed?[]:old),...incoming].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);
+      await archiveBars(db,asset.id,asset.source,old);
+      const incoming=await loadMarket({...asset,since:!changed?latest:null},{...env,DB:db},fetcher),merged=[...new Map([...(changed?[]:old),...incoming].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);
       const update=db.prepare("UPDATE assets SET data=?,source=?,status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(merged),source,now(),asset.id,asset.revision);
       const r=changed?(await db.batch([update,db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE asset_id=? AND status='running' AND EXISTS(SELECT 1 FROM assets WHERE id=? AND source=? AND revision=?)").bind(asset.id,asset.id,source,asset.revision+1)]))[0]:await update.run();
       if(r.meta.changes!==1){report.push({symbol:asset.symbol,status:'conflict'});continue;}
+      await archiveBars(db,asset.id,source,incoming);
+      await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind('daily_check:'+asset.id,JSON.stringify({source,time:Date.now()})).run();
       if(changed){await log(db,'source_changed',{symbol:asset.symbol,from:asset.source,to:source,activePaper:'paused'});}
       else await advancePaper(db,asset,merged);
       report.push({symbol:asset.symbol,status:'ready',bars:merged.length,source});
