@@ -1,4 +1,5 @@
 import * as connections from './connections.mjs';
+import {listStrategies,saveStrategy,proposeStrategy} from './strategies.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
 import {init,authorize,state,assetById,addAsset,removeAsset,importBars,runBacktest,startPaper,refresh,log} from './service.mjs';
 import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
@@ -12,8 +13,9 @@ export async function handleRequest(request,env,user){
   try{
     if(path==='/health')return json({service:'zlin-trading',status:'ok',execution:'paper_only'});
     if(!env.DB)throw new Problem(503,'交易数据库暂不可用。');
-    // This service is OWNER-PRIVATE at the Sites access boundary. Dispatch consumes
-    // its service credential before these unattended routes; never make this Site public.
+    // The audience can change outside the application. Never expose internal data
+    // or mutations solely on the assumption of a private platform boundary.
+    if(path.startsWith('/internal/')){if(!user)throw new Problem(401,'后台接口需要站点所有者登录。');await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);}
     if(path==='/internal/refresh'&&request.method==='POST'){if(request.headers.get('origin')||request.headers.get('x-trading-service')!=='1')throw new Problem(403,'仅支持服务端调度。');await init(env.DB);return json(await refresh(env.DB,await connections.configured(env)));}
     if(path==='/internal/status'&&request.method==='GET'){await init(env.DB);const s=await state(env.DB,env);const snapshot=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();return json({assets:s.assets,events:s.events.slice(0,2),quoteSnapshot:snapshot?JSON.parse(snapshot.value):null});}
     if(!user){if(path==='/')return html(login());throw new Problem(401,'请先登录交易研究室。');}
@@ -21,7 +23,8 @@ export async function handleRequest(request,env,user){
     if(path==='/'&&request.method==='GET')return html(page());
     await init(env.DB);
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
-    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/state','/api/deepseek/models','/api/quotes','/api/refresh','/api/analyze'].includes(path))env=await connections.configured(env);
+    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/state','/api/deepseek/models','/api/quotes','/api/refresh','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
+    if(path==='/api/strategies'&&request.method==='GET')return json(await listStrategies(env));
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
     if(path==='/api/quotes'&&request.method==='GET'){const cached=await env.DB.prepare("SELECT value FROM service_state WHERE key='quotes_cache'").first();if(cached&&Date.now()-JSON.parse(cached.value).time<15000)return json(JSON.parse(cached.value).data);const data=await connections.quotes(env);await env.DB.prepare("INSERT INTO service_state(key,value) VALUES('quotes_cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({time:Date.now(),data})).run();return json(data);}
@@ -33,6 +36,8 @@ export async function handleRequest(request,env,user){
     if(runMatch&&request.method==='GET'){const run=await env.DB.prepare('SELECT * FROM backtests WHERE id=?').bind(runMatch[1]).first();if(!run)throw new Problem(404,'回测不存在。');return new Response(run.result,{headers:{...headers,'Content-Type':'application/json','Content-Disposition':'attachment; filename="backtest.json"'}});}
     if(request.method!=='POST')throw new Problem(404,'接口不存在。');
     const input=await body(request);
+    if(path==='/api/strategies')return json(await saveStrategy(env,input),201);
+    if(path==='/api/strategies/propose')return json(await proposeStrategy(env,input));
     if(path==='/api/settings')return json(await connections.saveSettings(env,input));
     if(path==='/api/schwab/connect')return json(await connections.beginOAuth(env,user,new URL(request.url).origin));
     if(path==='/api/schwab/orders')return json(await connections.orders(env,input.account));

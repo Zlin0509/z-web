@@ -67,7 +67,7 @@ test('configuration and asset reads avoid per-secret database round trips',async
 
 test('Alpaca supplies completed IEX daily bars, follows pagination, and replaces old provider data',async t=>{
   const en={...env(t),ALPACA_API_KEY:'test-key',ALPACA_SECRET_KEY:'test-secret'};await call(en,'/api/state');
-  const history=bars(100),rows=history.map(b=>({t:new Date(b.time+16*3600000).toISOString(),o:b.open,h:b.high,l:b.low,c:b.close,v:b.volume}));let calls=0;
+  const history=bars(100).map(b=>({...b,time:b.time-2*day})),rows=history.map(b=>({t:new Date(b.time+16*3600000).toISOString(),o:b.open,h:b.high,l:b.low,c:b.close,v:b.volume}));let calls=0;
   const mock=async(url,options)=>{calls++;const u=new URL(url);assert.equal(u.hostname,'data.alpaca.markets');assert.equal(u.searchParams.get('feed'),'iex');assert.equal(u.searchParams.get('timeframe'),'1Day');assert.equal(u.searchParams.get('adjustment'),'raw');assert.equal(options.headers['APCA-API-KEY-ID'],'test-key');return Response.json(u.searchParams.has('page_token')?{bars:rows.slice(50),next_page_token:null}:{bars:[{...rows[0],t:new Date(Date.now()+day).toISOString()},...rows.slice(0,50)],next_page_token:'next'});};
   await en.DB.prepare("UPDATE assets SET data=?,status='ready',updated=? WHERE id='us:AAPL'").bind(JSON.stringify([{...history[0],time:history[0].time-day,close:1}]),new Date().toISOString()).run();
   const result=await refresh(en.DB,en,'us:AAPL',mock);assert.equal(result.report[0].source,'alpaca');assert.equal(calls,2);

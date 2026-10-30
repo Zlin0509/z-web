@@ -24,12 +24,35 @@ export function indicators(bars,market='crypto') {
   const ret=c.slice(-21).slice(1).map((v,i)=>Math.log(v/c.slice(-21)[i]));const avg=ret.reduce((a,b)=>a+b,0)/ret.length;const volatility=ret.length===20?Math.sqrt(ret.reduce((s,v)=>s+(v-avg)**2,0)/19)*Math.sqrt(market==='crypto'?365:252):null;
   return {close:last(c),sma20:mid,ema20:last(ema(c,20)),rsi14:last(rsi(c)),macd:last(macd),macdSignal:signal,macdHistogram:signal===null?null:last(macd)-signal,bollingerUpper:std===null?null:mid+2*std,bollingerLower:std===null?null:mid-2*std,atr14:atr,volatility20:volatility,volume:last(bars)?.volume??null};
 }
+export const ruleFields=['close','open','high','low','volume','sma_fast','sma_slow','ema_fast','ema_slow','rsi14','volume_sma','prior_high','prior_low'];
+export function validateRules(input){
+  let rules=input;if(typeof rules==='string'){try{rules=JSON.parse(rules);}catch{throw new Problem(400,'策略规则必须是有效 JSON。');}}
+  const validOperand=x=>typeof x==='number'?finite(x)&&Math.abs(x)<=1e12:ruleFields.includes(x);
+  const result={};for(const name of ['entry','exit']){
+    const group=rules?.[name];if(!group||!['all','any'].includes(group.match)||!Array.isArray(group.conditions)||group.conditions.length<1||group.conditions.length>8)throw new Problem(400,'入场和离场各需1–8条规则，match 为 all 或 any。');
+    result[name]={match:group.match,conditions:group.conditions.map(c=>{
+      if(!c||!validOperand(c.left)||!validOperand(c.right)||!['gt','lt','gte','lte','crossAbove','crossBelow'].includes(c.op))throw new Problem(400,'规则含不支持的指标、比较符或阈值。');
+      return {left:c.left,op:c.op,right:c.right};
+    })};
+  }return result;
+}
 export function config(input={}) {
   const p={strategy:input.strategy??'ma',fast:Number(input.fast??10),slow:Number(input.slow??30),initial:Number(input.initial??10000),allocation:Number(input.allocation??0.25),feeBps:Number(input.feeBps??10),slippageBps:Number(input.slippageBps??5),maxDrawdown:Number(input.maxDrawdown??0.2)};
-  if(!['ma','rsi','breakout'].includes(p.strategy)||!Number.isInteger(p.fast)||!Number.isInteger(p.slow)||p.fast<2||p.slow<=p.fast||p.slow>200||![p.initial,p.allocation,p.feeBps,p.slippageBps,p.maxDrawdown].every(finite)||p.initial<100||p.initial>1e9||p.allocation<=0||p.allocation>1||p.feeBps<0||p.feeBps>100||p.slippageBps<0||p.slippageBps>200||p.maxDrawdown<=0||p.maxDrawdown>0.9)throw new Problem(400,'策略参数不合法：短周期应小于长周期；仓位 0–100%，回撤阈值 0–90%。');return p;
+    if(!['ma','rsi','breakout','custom'].includes(p.strategy)||!Number.isInteger(p.fast)||!Number.isInteger(p.slow)||p.fast<2||p.slow<=p.fast||p.slow>200||![p.initial,p.allocation,p.feeBps,p.slippageBps,p.maxDrawdown].every(finite)||p.initial<100||p.initial>1e9||p.allocation<=0||p.allocation>1||p.feeBps<0||p.feeBps>100||p.slippageBps<0||p.slippageBps>200||p.maxDrawdown<=0||p.maxDrawdown>0.9)throw new Problem(400,'策略参数不合法：短周期应小于长周期；仓位 0–100%，回撤阈值 0–90%。');if(p.strategy==='custom')p.rules=validateRules(input.rules);return p;
 }
 export function targets(bars,p) {
   const close=bars.map(b=>b.close),fast=sma(close,p.fast),slow=sma(close,p.slow),rs=rsi(close);let held=false;
+    if(p.strategy==='custom'){
+      const rules=validateRules(p.rules),fields={sma_fast:fast,sma_slow:slow,ema_fast:ema(close,p.fast),ema_slow:ema(close,p.slow),rsi14:rs,volume_sma:sma(bars.map(b=>b.volume),p.slow),prior_high:bars.map((_,i)=>i>=p.slow?Math.max(...bars.slice(i-p.slow,i).map(b=>b.high)):null),prior_low:bars.map((_,i)=>i>=p.fast?Math.min(...bars.slice(i-p.fast,i).map(b=>b.low)):null)};
+      for(const field of ['close','open','high','low','volume'])fields[field]=bars.map(b=>b[field]);
+      const value=(operand,i)=>typeof operand==='number'?operand:fields[operand]?.[i];
+      const condition=(c,i)=>{const a=value(c.left,i),b=value(c.right,i);if(!finite(a)||!finite(b))return false;
+        if(c.op==='gt')return a>b;if(c.op==='lt')return a<b;if(c.op==='gte')return a>=b;if(c.op==='lte')return a<=b;
+        const prevA=value(c.left,i-1),prevB=value(c.right,i-1);return finite(prevA)&&finite(prevB)&&(c.op==='crossAbove'?prevA<=prevB&&a>b:prevA>=prevB&&a<b);
+      };
+      const matches=(group,i)=>group.match==='all'?group.conditions.every(c=>condition(c,i)):group.conditions.some(c=>condition(c,i));
+      return bars.map((_,i)=>{if(matches(rules.exit,i))held=false;else if(matches(rules.entry,i))held=true;return held;});
+    }
   return bars.map((b,i)=>{if(p.strategy==='ma')return slow[i]===null?false:fast[i]>slow[i];if(p.strategy==='rsi'){if(rs[i]!==null&&rs[i]<30)held=true;if(rs[i]!==null&&rs[i]>70)held=false;return held;}if(i>=p.slow){const prior=bars.slice(i-p.slow,i);if(b.close>Math.max(...prior.map(b=>b.high)))held=true;else if(b.close<Math.min(...bars.slice(i-p.fast,i).map(b=>b.low)))held=false;}return held;});
 }
 export const startPortfolio=p=>({cash:p.initial,units:0,cost:0,peak:p.initial,halted:false,fees:0,trades:[],curve:[],lastTime:0});
@@ -43,8 +66,8 @@ export function step(state,bar,want,p,copy=true) {
   const equity=s.cash+s.units*bar.close;s.peak=Math.max(s.peak,equity);if(1-equity/s.peak>=p.maxDrawdown)s.halted=true;
   s.curve.push({time:bar.time,equity});s.lastTime=bar.time;return s;
 }
-export function backtest(input,options={},market='crypto') {
-  const bars=normalizeBars(input),p=config(options),warmup=Math.max(p.slow,35);
+export function backtest(input,options={},market='crypto',evaluationStart=null) {
+    const bars=normalizeBars(input),p=config(options),startIndex=evaluationStart===null?0:bars.findIndex(b=>b.time>=evaluationStart),warmup=Math.max(p.slow,35,startIndex<0?bars.length:startIndex);
   if(bars.length<warmup+5)throw new Problem(400,`至少需要 ${warmup+5} 根日线，请增加数据或缩短长周期。`);
   const signals=targets(bars,p);let state=startPortfolio(p);const curve=[{time:bars[warmup].time-1,equity:p.initial}];
   for(let i=warmup;i<bars.length;i++)state=step(state,bars[i],signals[i-1],p,false);

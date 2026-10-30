@@ -1,0 +1,26 @@
+import {test,expect} from '@playwright/test';
+import {config} from '../server/engine.mjs';
+import {compareStrategies} from '../server/strategies.mjs';
+const day=86400000;
+const bars=Array.from({length:240},(_,i)=>{const c=100+i*.1+8*Math.sin(i/8);return {time:Date.UTC(2025,0,1)+i*day,open:c-.4,close:c,high:c+2,low:c-2,volume:1000+i};});
+const rules={entry:{match:'all',conditions:[{left:'sma_fast',op:'gt',right:'sma_slow'}]},exit:{match:'any',conditions:[{left:'sma_fast',op:'lt',right:'sma_slow'}]}};
+const candidate=config({strategy:'custom',fast:5,slow:20,rules});
+test('custom rules, AI generate/optimize, explicit application and saved versions work',async({page},info)=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto('/');await page.getByRole('link',{name:'使用 ChatGPT 登录'}).click();
+  await page.locator('[data-asset="us:AAPL"]').click();await page.getByRole('button',{name:'导入 CSV',exact:true}).click();
+  const csv='date,open,high,low,close,volume\n'+bars.map(b=>[new Date(b.time).toISOString().slice(0,10),b.open,b.high,b.low,b.close,b.volume].join(',')).join('\n');
+  await page.locator('#csv-file').setInputFiles({name:'strategy.csv',mimeType:'text/csv',buffer:Buffer.from(csv)});await page.getByRole('button',{name:'验证并导入'}).click();await expect(page.locator('#notice')).toContainText('数据已验证');
+  await page.locator('[data-tab="backtest"]').click();await page.locator('[name="assetId"]').selectOption('us:AAPL');
+  await page.locator('[name="strategy"]').selectOption('custom');await expect(page.locator('[name="rules"]')).toBeVisible();await page.locator('[name="rules"]').fill(JSON.stringify(rules));
+  await page.getByRole('button',{name:'运行回测',exact:false}).click();await expect(page.locator('#notice')).toContainText('回测已完成');
+  const name='规则测试 '+info.project.name+' '+Date.now();await page.locator('#strategy-name').fill(name);await page.locator('#save-strategy').click();await expect(page.locator('#strategy-status')).toContainText('版本已保存');
+  await page.reload();await page.locator('#saved-strategies').selectOption({label:await page.locator('#saved-strategies option').filter({hasText:name}).textContent()});await page.locator('#load-strategy').click();await expect(page.locator('[name="rules"]')).toHaveValue(JSON.stringify(rules,null,2));
+  let mode;await page.route('**/api/strategies/propose',async route=>{const data=route.request().postDataJSON();mode=data.mode;await route.fulfill({json:{id:'mock',assetId:'us:AAPL',name:'AI 趋势策略',rationale:'增加趋势过滤',risks:['可能出现回撤'],model:'selected-model',source:{symbol:'AAPL',provider:'csv'},config:candidate,comparison:compareStrategies(bars,config(data.config),candidate,'us')}});});
+  await page.locator('[name="fast"]').fill('8');await page.locator('#strategy-goal').fill('减少震荡交易，控制回撤。');await page.locator('#ai-generate').click();await expect(page.locator('#strategy-proposal')).toContainText('验证区间（未提供给模型）');expect(mode).toBe('generate');await expect(page.locator('[name="fast"]')).toHaveValue('8');
+  await page.locator('#apply-proposal').click();await expect(page.locator('[name="fast"]')).toHaveValue('5');
+  await page.locator('[data-tab="overview"]').click();await page.locator('[data-tab="backtest"]').click();await expect(page.locator('[name="fast"]')).toHaveValue('5');
+  await page.locator('#strategy-goal').fill('降低换手率，保持仓位上限。');await page.locator('#ai-optimize').click();await expect(page.locator('#strategy-status')).toContainText('方案已生成');expect(mode).toBe('optimize');
+  await page.screenshot({path:'/tmp/zlin-ai-strategies-'+info.project.name+'.png',fullPage:true});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);expect(errors).toEqual([]);
+});
