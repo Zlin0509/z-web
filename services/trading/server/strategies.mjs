@@ -5,11 +5,12 @@ import {remote} from './connections.mjs';
 
 export async function listStrategies(env){const rows=(await env.DB.prepare("SELECT value FROM service_state WHERE key LIKE 'strategy:%' ORDER BY json_extract(value,'$.created') DESC LIMIT 50").all()).results;return {strategies:rows.map(r=>JSON.parse(r.value))};}
 export async function saveStrategy(env,input){
+  if(typeof input.assetId!=='string')throw new Problem(400,'请选择策略标的。');
   const asset=await assetById(env.DB,input.assetId),name=String(input.name||'').trim();
   if(!name||name.length>80)throw new Problem(400,'策略名称需要1–80个字符。');
-  const p=config(input.config),parentId=input.parentId||null;
+  const p=config(input.config),parentId=input.parentId||null,goal=String(input.goal||'');if(goal.length>2000)throw new Problem(400,'策略目标最多2000字。');
   if(parentId){const parent=await env.DB.prepare('SELECT value FROM service_state WHERE key=?').bind('strategy:'+parentId).first();if(!parent||JSON.parse(parent.value).assetId!==asset.id)throw new Problem(400,'父策略版本不存在或属于其他标的。');}
-  const version={id:crypto.randomUUID(),name,assetId:asset.id,created:new Date().toISOString(),config:p,parentId};
+  const version={id:crypto.randomUUID(),name,assetId:asset.id,created:new Date().toISOString(),config:p,parentId,goal};
   await env.DB.prepare('INSERT INTO service_state(key,value) VALUES(?,?)').bind('strategy:'+version.id,JSON.stringify(version)).run();
   await log(env.DB,'strategy_saved',{id:version.id,name,parentId});return version;
 }

@@ -1,3 +1,4 @@
+import {libraryList,libraryItem,saveDraft,manageLibrary} from './strategy-library.mjs';
 import {featureContext,marketContext,readRecord,auditData} from './research.mjs';
 import {searchStocks,rememberStock} from './catalog.mjs';
 import * as connections from './connections.mjs';
@@ -25,6 +26,8 @@ export async function handleRequest(request,env,user){
     await authorize(env.DB,user,env.TRADING_OWNER_EMAIL);
     if(path==='/'&&request.method==='GET')return html(page());
     await init(env.DB);
+    if(path==='/api/strategy-library'&&request.method==='GET')return json(await libraryList(env,new URL(request.url).searchParams));
+    if(path==='/api/strategy-library/item'&&request.method==='GET'){const q=new URL(request.url).searchParams;return json(await libraryItem(env,q.get('kind'),q.get('id')));}
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
     if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/deepseek/models','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
     if(path==='/api/strategies/research'&&request.method==='GET')return json(await researchHistory(env,new URL(request.url).searchParams.get('asset')));
@@ -43,6 +46,8 @@ export async function handleRequest(request,env,user){
     if(runMatch&&request.method==='GET'){const run=await env.DB.prepare('SELECT * FROM backtests WHERE id=?').bind(runMatch[1]).first();if(!run)throw new Problem(404,'回测不存在。');return new Response(run.result,{headers:{...headers,'Content-Type':'application/json','Content-Disposition':'attachment; filename="backtest.json"'}});}
     if(request.method!=='POST')throw new Problem(404,'接口不存在。');
     const input=await body(request);
+    if(path==='/api/strategy-drafts')return json(await saveDraft(env,input));
+    if(path==='/api/strategy-library/manage')return json(await manageLibrary(env,input));
     if(path==='/api/strategies')return json(await saveStrategy(env,input),201);
     if(path==='/api/strategies/finalize')return json(await finalizeResearch(env,input));
     if(path==='/api/strategies/propose')return json(await proposeStrategy(env,input));
