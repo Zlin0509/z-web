@@ -1,3 +1,4 @@
+import {refreshCatalog,searchStocks,rememberStock} from '../server/catalog.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
@@ -5,7 +6,7 @@ import {readFileSync} from 'node:fs';
 import {indicators,sma,ema,rsi,parseCSV,backtest,config,step,startPortfolio} from '../server/engine.mjs';
 import {handleRequest} from '../server/controller.mjs';
 import {loadMarket,analyze,okxAccount} from '../server/providers.mjs';
-import {refresh,archiveBars} from '../server/service.mjs';
+import {refresh,archiveBars,removeAssets} from '../server/service.mjs';
 import {authorizeSync,refreshQuotes} from '../server/snapshots.mjs';
 import {quotes} from '../server/connections.mjs';
 const day=86400000;
@@ -124,4 +125,35 @@ test('background quote snapshots batch symbols, retain last good values on error
   t.mock.method(globalThis,'fetch',async url=>{calls++;if(fail)return new Response('',{status:429});return String(url).includes('alpaca')?Response.json({quotes:{AAPL:{bp:123,ap:124,t:new Date().toISOString()},SPY:{bp:400,ap:401,t:new Date().toISOString()}}}):Response.json({code:'0',data:['BTC-USDT','ETH-USDT'].map(instId=>({instId,last:'100',bidPx:'99',askPx:'101',ts:String(clock)}))});});
   await refreshQuotes(en);assert.equal(calls,2);await refreshQuotes(en);assert.equal(calls,2);
   clock+=300001;fail=true;const result=await refreshQuotes(en);assert.equal(calls,4);assert.equal(result.quotes.find(q=>q.symbol==='AAPL').bid,123);assert.ok(result.quotes.every(q=>q.error));
+});
+
+
+test('stock directory caches provider names, searches all matches with pagination, and marks watched symbols',async t=>{
+  const en={...env(t),ALPACA_API_KEY:'test',ALPACA_SECRET_KEY:'test'};await call(en,'/api/state');let calls=0;
+  const entries=Array.from({length:605},(_,i)=>({symbol:'T'+String(i).padStart(4,'0'),name:'Matching Company '+i,exchange:'NASDAQ',class:'us_equity',status:'active',tradable:true}));entries.push({symbol:'AAPL',name:'Apple Inc.',exchange:'NASDAQ',class:'us_equity',status:'active',tradable:true});
+  const fetcher=async(url,opt)=>{calls++;assert.equal(new URL(url).pathname,'/v2/assets');assert.equal(opt.headers['APCA-API-KEY-ID'],'test');return Response.json(entries);};
+  assert.equal((await refreshCatalog(en,fetcher)).count,606);await refreshCatalog(en,fetcher);assert.equal(calls,1);
+  const found=await searchStocks(en.DB,'apple');assert.equal(found.items[0].symbol,'AAPL');assert.equal(found.items[0].name,'Apple Inc.');assert.equal(found.items[0].added,true);
+  const exact=await searchStocks(en.DB,'T0001');assert.equal(exact.items[0].symbol,'T0001');
+  const symbols=new Set();let offset=0;do{const page=await searchStocks(en.DB,'Matching Company',offset);assert.equal(page.total,605);page.items.forEach(a=>symbols.add(a.symbol));offset=page.nextOffset;}while(offset!==null);assert.equal(symbols.size,605);
+  t.mock.method(globalThis,'fetch',()=>{throw Error('search must only read stored directory');});const api=await call(en,'/api/stocks/search?q=apple');assert.equal(api.status,200);assert.equal((await api.json()).items[0].name,'Apple Inc.');assert.equal((await call(en,'/api/stocks/search?q=apple',{user:null})).status,401);
+  const stored=await(await call(en,'/api/state')).json();assert.equal(stored.assets.find(a=>a.symbol==='AAPL').name,'Apple Inc.');
+});
+
+test('stock directory failures preserve stored results and apply retry cooldown',async t=>{
+  const en={...env(t),ALPACA_API_KEY:'test',ALPACA_SECRET_KEY:'test'};await call(en,'/api/state');
+  await refreshCatalog(en,async()=>Response.json([{symbol:'ABC',name:'ABC Company',exchange:'NYSE',status:'active',class:'us_equity',tradable:true}]));
+  const old=en.DB.prepare("SELECT value FROM service_state WHERE key='stock_catalog'").first();const meta=JSON.parse(old.value);meta.updated='2020-01-01T00:00:00Z';en.DB.prepare("UPDATE service_state SET value=? WHERE key='stock_catalog'").bind(JSON.stringify(meta)).run();en.DB.prepare("DELETE FROM service_state WHERE key='catalog_lock'").run();
+  let calls=0;const bad=async()=>{calls++;return new Response('',{status:429});};assert.ok((await refreshCatalog(en,bad)).error);await refreshCatalog(en,bad);assert.equal(calls,1);assert.equal((await searchStocks(en.DB,'abc')).items[0].name,'ABC Company');
+});
+
+test('bulk watchlist deletion checks every revision, stops simulations and retains history',async t=>{
+  const en=env(t);await call(en,'/api/state');
+  const pair=[{assetId:'us:AAPL',revision:0},{assetId:'us:SPY',revision:0}];
+  await en.DB.prepare("INSERT INTO paper_sessions(id,asset_id,created,status,data) VALUES('paper','us:AAPL','2025-01-01','running','{}')").run();
+  await en.DB.prepare("INSERT INTO service_state(key,value) VALUES('history:us:AAPL:alpaca:2025','[]')").run();
+  await assert.rejects(()=>removeAssets(en.DB,[pair[0],{...pair[1],revision:9}]),e=>e.status===409);assert.equal((await(await call(en,'/api/state')).json()).assets.length,4);assert.equal(en.DB.prepare("SELECT status FROM paper_sessions WHERE id='paper'").first().status,'running');
+  await assert.rejects(()=>removeAssets(en.DB,[pair[0],pair[0]]),e=>e.status===400);
+  assert.equal((await call(en,'/api/assets/remove',{user:null,data:{assets:pair}})).status,401);
+  const result=await call(en,'/api/assets/remove',{data:{assets:pair}});assert.equal(result.status,200);assert.equal(en.DB.prepare('SELECT count(*) n FROM assets').first().n,2);assert.equal(en.DB.prepare("SELECT status FROM paper_sessions WHERE id='paper'").first().status,'stopped');assert.ok(en.DB.prepare("SELECT key FROM service_state WHERE key LIKE 'history:%'").first());
 });

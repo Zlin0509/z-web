@@ -1,14 +1,16 @@
 import {test,expect} from '@playwright/test';
-test('watchlist supports deleting an added symbol and preserves navigation',async({page},info)=>{
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  await page.goto('/');await page.getByRole('link',{name:'使用 ChatGPT 登录'}).click();
-  await expect(page.locator('.watch')).toHaveCount(4);
-  await page.locator('#add-asset').click();const symbol=info.project.name==='desktop'?'IBM':'MSFT';
-  await page.locator('#asset-form [name="symbol"]').fill(symbol);await page.getByRole('button',{name:'添加到观察列表'}).click();
-  await expect(page.locator('.watch')).toHaveCount(5);await expect(page.locator('.chart-title h2')).toHaveText(symbol);
-  page.once('dialog',dialog=>dialog.dismiss());await page.locator('#remove-asset').click();await expect(page.locator('.watch')).toHaveCount(5);
-  page.once('dialog',dialog=>dialog.accept());await page.locator('#remove-asset').click();
-  await expect(page.locator('#notice')).toContainText('标的已删除');await expect(page.locator('.watch')).toHaveCount(4);
-  await expect(page.locator(`[data-asset="us:${symbol}"]`)).toHaveCount(0);
-  await page.locator('[data-tab="backtest"]').click();await expect(page.locator('#strategy-form')).toBeVisible();expect(errors).toEqual([]);
+test('stock search lists codes and company names, pagination and bulk deletion share the watchlist',async({page},info)=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));let pages=[];
+  await page.route('**/api/stocks/search?**',async route=>{const u=new URL(route.request().url()),q=u.searchParams.get('q'),offset=Number(u.searchParams.get('offset'));pages.push(offset);await route.fulfill({json:{items:offset?[{symbol:'MSFT',name:'Microsoft Corporation',exchange:'NASDAQ',added:false}]:[{symbol:'IBM',name:'International Business Machines Corporation',exchange:'NYSE',added:false},{symbol:'AAPL',name:'Apple Inc.',exchange:'NASDAQ',added:true}],total:3,nextOffset:offset?null:50,updated:new Date().toISOString(),source:'Alpaca · 活跃美股目录'}});});
+  await page.goto('/');await page.getByRole('link',{name:'使用 ChatGPT 登录'}).click();await expect(page.locator('.watch')).toHaveCount(4);
+  await page.locator('#add-asset').click();await page.locator('#stock-search').fill('company');await expect(page.locator('#stock-search-results')).toContainText('International Business Machines Corporation');await expect(page.locator('.stock-result[data-symbol="AAPL"]')).toBeDisabled();
+  await page.locator('.stock-result[data-symbol="IBM"]').click();await expect(page.locator('#asset-selection')).toContainText('IBM');await page.locator('#add-asset-submit').click();await expect(page.locator('.watch')).toHaveCount(5);
+  await page.locator('#add-asset').click();await expect(page.locator('#stock-search-more')).toBeVisible();await page.locator('#stock-search-more').click();await expect(page.locator('#stock-search-results')).toContainText('Microsoft Corporation');await expect(page.locator('#stock-search-status')).toContainText('已展示 3 个');expect(pages).toContain(50);await page.screenshot({path:'/tmp/zlin-stock-search-'+info.project.name+'.png',fullPage:true});
+  await page.locator('.stock-result[data-symbol="MSFT"]').click();await page.locator('#add-asset-submit').click();await expect(page.locator('.watch')).toHaveCount(6);
+  await page.locator('#watch-select-all').check();await expect(page.locator('#remove-selected')).toHaveText('删除选中（6）');await page.locator('#watch-select-all').uncheck();await expect(page.locator('#remove-selected')).toBeDisabled();
+  await page.getByRole('checkbox',{name:'选择 IBM',exact:true}).check();await page.getByRole('checkbox',{name:'选择 MSFT',exact:true}).check();await expect(page.locator('#remove-selected')).toHaveText('删除选中（2）');
+  await page.screenshot({path:'/tmp/zlin-watchlist-'+info.project.name+'.png',fullPage:true});
+  page.once('dialog',d=>d.dismiss());await page.locator('#remove-selected').click();await expect(page.locator('.watch')).toHaveCount(6);
+  page.once('dialog',d=>d.accept());await page.locator('#remove-selected').click();await expect(page.locator('#notice')).toContainText('已删除 2 个标的');await expect(page.locator('.watch')).toHaveCount(4);await expect(page.locator('#remove-selected')).toBeDisabled();await expect(page.locator('#remove-asset')).toHaveCount(0);
+  await page.locator('[data-tab="backtest"]').click();await expect(page.locator('#strategy-form')).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);expect(errors).toEqual([]);
 });

@@ -19,7 +19,7 @@ export async function assetById(db,id){const a=await db.prepare('SELECT * FROM a
 export function describe(a){const bars=JSON.parse(a.data);return {...a,data:undefined,bars:bars.length,asOf:bars.at(-1)?.time??null,indicators:bars.length?indicators(bars,a.market):null};}
 export async function state(db,env,selected=null){
   const [assets,runs,sessions,events,analyses]=await Promise.all([
-    db.prepare('SELECT * FROM assets ORDER BY market,symbol').all(),
+    db.prepare("SELECT a.*,json_extract(m.value,'$.name') AS name FROM assets a LEFT JOIN service_state m ON m.key='asset_meta:'||a.id ORDER BY a.market,a.symbol").all(),
     db.prepare("SELECT id,asset_id,created,json_remove(result,'$.curve','$.benchmark','$.trades') AS result FROM backtests ORDER BY created DESC LIMIT 30").all(),
     db.prepare('SELECT * FROM paper_sessions ORDER BY created DESC LIMIT 30').all(),
     db.prepare('SELECT * FROM events ORDER BY created DESC LIMIT 40').all(),
@@ -30,7 +30,7 @@ export async function state(db,env,selected=null){
 }
 export async function addAsset(db,input){
   const {market}=input,symbol=String(input.symbol??'').trim().toUpperCase();const source=input.source??(market==='crypto'?'okx':'alpha');
-  if(!['us','crypto'].includes(market)||!(market==='crypto'?/^[A-Z0-9]{2,15}-USDT$/:/^[A-Z][A-Z0-9.-]{0,9}$/).test(symbol)||!['csv',market==='crypto'?'okx':'alpha'].includes(source))throw new Problem(400,'请输入美股代码（如 AAPL）或 USDT 现货交易对（如 BTC-USDT）。');
+  if(!['us','crypto'].includes(market)||!(market==='crypto'?/^[A-Z0-9]{2,15}-USDT$/:/^[A-Z0-9][A-Z0-9./^_-]{0,31}$/).test(symbol)||!['csv',market==='crypto'?'okx':'alpha'].includes(source))throw new Problem(400,'请输入美股代码（如 AAPL）或 USDT 现货交易对（如 BTC-USDT）。');
   const count=await db.prepare('SELECT count(*) AS n FROM assets').first();if(count.n>=12)throw new Problem(400,'第一版最多跟踪 12 个标的。');
   try{await db.prepare('INSERT INTO assets (id,symbol,market,source) VALUES (?,?,?,?)').bind(market+':'+symbol,symbol,market,source).run();}catch(e){if(/UNIQUE/.test(String(e)))throw new Problem(409,'这个标的已在列表中。');throw e;}
 }
@@ -44,6 +44,16 @@ export async function removeAsset(db,id,revision){
   if(result[0].meta.changes!==1)throw new Problem(409,'标的数据已更新，请刷新后再删除。');
   await log(db,'asset_removed',{symbol:asset.symbol,stopped:result[1].meta.changes,history:'retained'});
   return {ok:true,symbol:asset.symbol,stopped:result[1].meta.changes};
+}
+export async function removeAssets(db,input){
+  if(!Array.isArray(input)||input.length<1||input.length>12||new Set(input.map(x=>x?.assetId)).size!==input.length||input.some(x=>typeof x?.assetId!=='string'||!Number.isInteger(x.revision)))throw new Problem(400,'请勾选1–12个不同标的，并携带当前版本。');
+  const ids=input.map(x=>x.assetId),placeholders=ids.map(()=>'?').join(','),guard=input.map(()=>'(id=? AND revision=?)').join(' OR ');
+  const result=await db.batch([
+    db.prepare(`DELETE FROM assets WHERE id IN (${placeholders}) AND (SELECT count(*) FROM assets WHERE ${guard})=?`).bind(...ids,...input.flatMap(x=>[x.assetId,x.revision]),input.length),
+    db.prepare(`UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id IN (${placeholders}) AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE assets.id=paper_sessions.asset_id)`).bind(...ids)
+  ]);
+  if(result[0].meta.changes!==ids.length)throw new Problem(409,'列表数据已更新，本次未删除；请读取数据库后重新勾选。');
+  await log(db,'asset_removed',{symbols:ids.map(x=>x.split(':')[1]),stopped:result[1].meta.changes,history:'retained'});return {ok:true,removed:ids,stopped:result[1].meta.changes};
 }
 export async function runBacktest(db,id,options){const a=await assetById(db,id);const result=backtest(JSON.parse(a.data),options,a.market);result.source={provider:a.source,updated:a.updated,symbol:a.symbol,priceBasis:a.market==='us'?'未保证复权；跨拆股区间需自行导入一致复权 OHLC':'现货日线'};const run={id:crypto.randomUUID(),created:now(),asset_id:id,result};await db.prepare('INSERT INTO backtests (id,asset_id,created,result) VALUES (?,?,?,?)').bind(run.id,id,run.created,JSON.stringify(result)).run();await log(db,'backtest',{symbol:a.symbol,id:run.id,return:result.metrics.totalReturn});return run;}
 export async function startPaper(db,id,options){const a=await assetById(db,id),bars=JSON.parse(a.data),p=config(options);if(a.source==='csv')throw new Problem(400,'模拟运行需要联网行情；CSV 用于离线回测。');if(bars.length<Math.max(p.slow,35)+5)throw new Problem(400,'请先同步足够日线数据。');if(Date.now()-bars.at(-1).time>(a.market==='crypto'?3:7)*86400000)throw new Problem(409,'行情过旧，请先刷新数据。');

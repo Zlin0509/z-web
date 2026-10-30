@@ -91,3 +91,11 @@ AI 不能提高仓位和回撤停机上限，不能改掉手续费、滑点或�
 定时5分钟行情快照适合当前研究界面；实际交易信号触发时仍须获取新鲜行情/账户状态，行情缓存与交易执行不能共用“永不请求”的规则。日线回测中的历史次日开盘成交只是模拟假设；自动交易须改为信号形成后在真实可交易时段提交，记录实际成交。
 
 官方参考：[Alpaca Paper Trading](https://docs.alpaca.markets/docs/paper-trading) · [Alpaca Client Order ID](https://docs.alpaca.markets/us/v1.4.2/reference/getorderbyclientorderid) · [OKX API / Demo Trading](https://www.okx.com/docs-v5/en/)。
+
+## 自选列表管理
+
+观察列表统一提供添加、逐项勾选、全选和「删除选中」；删除前展示所选代码，停止对应模拟策略，保留历史回测、成交和日线归档。批量删除校验全部标的的 revision，任何版本过期都不删除仍存在的其他标的。当前最多跟踪12个标的。
+
+添加美股时可按代码或英文公司/基金名称搜索，显示代码、完整名称、交易所与已添加状态。使用 Alpaca GET `/v2/assets?status=active&asset_class=us_equity` 的活跃美股目录，包含股票与 ETF；并非全球所有证券。目录每日由后台同步到 D1，按500条分块存储并原子发布；供应商失败保留旧版本，5分钟冷却。搜索接口仅查询数据库，不随输入请求供应商；每页50条，显示总匹配数，通过「加载更多匹配」遍历全部结果。虚拟币仍通过 USDT 现货交易对代码添加。
+
+新增 GET `/api/stocks/search?q=...&offset=...`，及 POST `/api/assets/remove` 的 `{assets:[{assetId,revision}]}` 批量格式；均要求所有者身份，删除另需同源 CSRF 校验。单标的旧格式继续兼容。

@@ -1,8 +1,9 @@
+import {searchStocks,rememberStock} from './catalog.mjs';
 import * as connections from './connections.mjs';
 import {authorizeSync,readQuotes,syncMarket} from './snapshots.mjs';
 import {listStrategies,saveStrategy,proposeStrategy} from './strategies.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
-import {init,authorize,state,assetById,addAsset,removeAsset,importBars,runBacktest,startPaper,log} from './service.mjs';
+import {init,authorize,state,assetById,addAsset,removeAsset,removeAssets,importBars,runBacktest,startPaper,log} from './service.mjs';
 import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
 import {page,login} from '../ui/page.mjs';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'same-origin'};
@@ -31,6 +32,7 @@ export async function handleRequest(request,env,user){
     if(path==='/api/quotes'&&request.method==='GET')return json(await readQuotes(env));
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
     if(path==='/api/state'&&request.method==='GET'){const status=await connections.settings(env);return json(await state(env.DB,{...env,...status.configured,DEEPSEEK_MODEL:status.model},new URL(request.url).searchParams.get('asset')));}
+    if(path==='/api/stocks/search'&&request.method==='GET'){const q=new URL(request.url).searchParams;return json(await searchStocks(env.DB,q.get('q'),Number(q.get('offset')||0)));}
     const assetMatch=path.match(/^\/api\/assets\/([^/]+)$/);
     if(assetMatch&&request.method==='GET'){const a=await assetById(env.DB,decodeURIComponent(assetMatch[1]));return json({...a,data:JSON.parse(a.data)});}
     const detailMatch=path.match(/^\/api\/runs\/([^/]+)$/);
@@ -47,8 +49,8 @@ export async function handleRequest(request,env,user){
     if(path==='/api/schwab/preview')return json(await connections.previewOrder(env,input));
     if(path==='/api/schwab/submit')return json(await connections.submitOrder(env,input));
     if(path==='/api/schwab/cancel')return json(await connections.cancelOrder(env,input));
-    if(path==='/api/assets/remove')return json(await removeAsset(env.DB,input.assetId,input.revision));
-    if(path==='/api/assets'){await addAsset(env.DB,input);return json({ok:true},201);}
+    if(path==='/api/assets/remove')return json(input.assets?await removeAssets(env.DB,input.assets):await removeAsset(env.DB,input.assetId,input.revision));
+    if(path==='/api/assets'){await addAsset(env.DB,input);if(input.market==='us')await rememberStock(env.DB,String(input.symbol).trim().toUpperCase());return json({ok:true},201);}
     if(path==='/api/import'){await importBars(env.DB,input.assetId,parseCSV(input.csv),input.revision);return json({ok:true});}
     if(path==='/api/refresh')return json(await syncMarket(env,input.assetId??null));
     if(path==='/api/backtest')return json(await runBacktest(env.DB,input.assetId,input.config),201);
