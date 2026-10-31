@@ -86,3 +86,12 @@ test('exhausted windows can advance on new data even when no valid candidate was
   assert.equal((await researchSession(env.DB,asset)).id,old.id);
   asset.data=JSON.stringify([...bars,...Array.from({length:60},(_,i)=>({...bars.at(-1),time:bars.at(-1).time+(i+1)*day}))]);const next=await researchSession(env.DB,asset);assert.notEqual(next.id,old.id);assert.ok((await readRecord(env.DB,'research_session:'+old.id)).closed);assert.ok(next.bars[next.plan.developmentEnd].time>old.bars.at(-1).time);
 });
+
+test('latest indicator summaries exactly match full research series across warmups, markets and price paths',()=>{
+  const names={close:'close',sma20:'sma20',ema20:'ema20',rsi14:'rsi14',macd:'macd',macdSignal:'macd_signal',macdHistogram:'macd_histogram',bollingerUpper:'bollinger_upper',bollingerLower:'bollinger_lower',atr14:'atr14',volatility20:'volatility20',volume:'volume'};
+  for(const market of ['us','crypto'])for(const shape of ['flat','trend','gaps'])for(const n of [0,2,13,14,19,20,21,26,33,34,120,1254,2500]){
+    const sample=Array.from({length:n},(_,i)=>{const close=shape==='flat'?100:shape==='trend'?100+i*.1:100+i*.01+20*Math.sin(i/7);return {time:i*day,open:close-.5,high:close+2,low:close-2,close,volume:i%11===0?0:1000+i};});
+    const full=featureSeries(sample,undefined,market),shown=indicators(sample,market);
+    for(const [key,series] of Object.entries(names))assert.equal(shown[key],full[series].at(-1)??null,`${market}/${shape}/${n}/${key}`);
+  }
+});

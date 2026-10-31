@@ -9,7 +9,7 @@ test('private login, CSV import, backtest, persistence, export, tabs and respons
   await page.locator('[data-asset="us:AAPL"]').click();await page.getByRole('button',{name:'导入 CSV',exact:true}).click();await page.locator('#csv-file').setInputFiles({name:'sample.csv',mimeType:'text/csv',buffer:Buffer.from(csv)});await page.getByRole('button',{name:'验证并导入'}).click();await expect(page.locator('#notice')).toContainText('数据已验证');
   await page.locator('[data-tab="backtest"]').click();await page.getByRole('button',{name:'运行回测',exact:false}).click();await expect(page.locator('#notice')).toContainText('回测已完成');await expect(page.locator('.stats')).toBeVisible();await expect(page.locator('svg[aria-label="策略权益和买入持有基准"]')).toBeVisible();
   const download=page.waitForEvent('download');await page.getByRole('link',{name:'导出结果'}).click();expect((await download).suggestedFilename()).toBe('backtest.json');
-  await page.reload();await expect(page.locator('.stats')).toBeVisible();await page.screenshot({path:'/tmp/zlin-trading-backtest-'+info.project.name+'.png',fullPage:true});
+  await page.reload();await expect(page.locator('#draft-name')).toBeEnabled();await page.getByRole('button',{name:'打开最近一次回测'}).click();await expect(page.locator('.stats')).toBeVisible();await page.screenshot({path:'/tmp/zlin-trading-backtest-'+info.project.name+'.png',fullPage:true});
   await page.locator('[data-tab="integrations"]').click();await expect(page.getByRole('button',{name:'检查账户连接'})).toBeDisabled();
   await page.locator('[data-tab="paper"]').click();await expect(page.locator('#view')).toContainText('尚未启动模拟策略');
   await page.locator('[data-tab="logs"]').click();await expect(page.locator('.event')).not.toHaveCount(0);

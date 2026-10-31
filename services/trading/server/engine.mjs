@@ -19,7 +19,9 @@ export function ema(a,n){let prev=null,sum=0;return a.map((v,i)=>{sum+=v;if(i<n-
 export function rsi(a,n=14){let gain=0,loss=0;return a.map((v,i)=>{if(!i)return null;const d=v-a[i-1];if(i<=n){gain+=Math.max(d,0)/n;loss+=Math.max(-d,0)/n;}else{gain=(gain*(n-1)+Math.max(d,0))/n;loss=(loss*(n-1)+Math.max(-d,0))/n;}return i<n?null:loss===0?(gain===0?50:100):100-100/(1+gain/loss);});}
 export const FEATURE_VERSION='causal-daily-v2';
 // One causal series builder is shared by AI context, backtests and paper signals.
-export function featureSeries(bars,p={fast:10,slow:30},market='crypto') {
+export function featureSeries(bars,p,market='crypto') {return buildFeatureSeries(bars,p,market);}
+// Display summaries retain recursive EMA/RSI/ATR history, but skip unused rolling windows.
+function buildFeatureSeries(bars,p={fast:10,slow:30},market='crypto',latestOnly=false) {
   const c=bars.map(b=>b.close),v=bars.map(b=>b.volume),n=c.length;
   const f={};for(const key of ['open','high','low','close','volume'])f[key]=bars.map(b=>b[key]);
   Object.assign(f,{sma_fast:sma(c,p.fast),sma_slow:sma(c,p.slow),ema_fast:ema(c,p.fast),ema_slow:ema(c,p.slow),sma20:sma(c,20),ema20:ema(c,20),rsi14:rsi(c),volume_sma:sma(v,p.slow)});
@@ -31,6 +33,7 @@ export function featureSeries(bars,p={fast:10,slow:30},market='crypto') {
   const vol20=sma(v,20);let atr=null;
   for(let i=0;i<n;i++){
     if(i===13)atr=tr.slice(0,14).reduce((a,b)=>a+b,0)/14;else if(i>13)atr=(atr*13+tr[i])/14;
+    if(latestOnly&&i<n-1)continue;
     f.atr14[i]=atr;f.atr_pct[i]=atr===null?null:atr/c[i];f.dollar_volume[i]=c[i]*v[i];
     f.rvol[i]=vol20[i]>0?v[i]/vol20[i]:null;
     if(i>=p.slow)f.prior_high[i]=Math.max(...bars.slice(i-p.slow,i).map(b=>b.high));
@@ -47,7 +50,7 @@ export function featureSeries(bars,p={fast:10,slow:30},market='crypto') {
   return f;
 }
 export function indicators(bars,market='crypto') {
-  const f=featureSeries(bars,undefined,market),last=k=>f[k].at(-1)??null;
+  const f=buildFeatureSeries(bars,undefined,market,true),last=k=>f[k].at(-1)??null;
   return {close:last('close'),sma20:last('sma20'),ema20:last('ema20'),rsi14:last('rsi14'),macd:last('macd'),macdSignal:last('macd_signal'),macdHistogram:last('macd_histogram'),bollingerUpper:last('bollinger_upper'),bollingerLower:last('bollinger_lower'),atr14:last('atr14'),volatility20:last('volatility20'),volume:last('volume')};
 }
 export const ruleFields=['close','open','high','low','volume','sma_fast','sma_slow','ema_fast','ema_slow','sma20','ema20','rsi14','volume_sma','prior_high','prior_low','macd','macd_signal','macd_histogram','macd_change','bollinger_upper','bollinger_lower','bollinger_width','bollinger_pct','atr14','atr_pct','volatility20','vol_percentile','rvol','dollar_volume','sma_slope','trend_distance','rsi_change','return5','return20','return60'];

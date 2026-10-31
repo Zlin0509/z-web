@@ -40,3 +40,14 @@ test('library reads and edits remain owner-only and writes require same-origin C
   const env=await setup(t);for(const path of ['/api/strategy-library','/api/strategy-library/item?kind=draft&id=a','/api/strategy-drafts','/api/strategy-library/manage']){assert.equal((await handleRequest(new Request('https://test.site'+path),env,null)).status,401);assert.equal((await handleRequest(new Request('https://test.site'+path),env,{userId:'other',email:'other@test.com'})).status,403);}
   const request=new Request('https://test.site/api/strategy-drafts',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.test'},body:JSON.stringify(draft)});assert.equal((await handleRequest(request,env,{userId:'owner',email:'owner@test.com'})).status,403);
 });
+
+test('draft save uses two database queries and an indexed summary list excludes similarly named records',async t=>{
+  const env=await setup(t),original=env.DB.prepare.bind(env.DB),queries=[];
+  env.DB.prepare=q=>{queries.push(q);return original(q);};
+  const saved=await saveDraft(env,draft);assert.equal(queries.length,2);assert.match(queries[1],/RETURNING value/);
+  queries.length=0;await saveDraft(env,{...saved,name:'Changed'});assert.equal(queries.length,2);
+  // LIKE treats underscores as wildcards; these unrelated keys must never enter the library.
+  await original('INSERT INTO service_state(key,value) VALUES(?,?)').bind('strategyXdraft:wrong',JSON.stringify({...saved,id:'wrong'})).run();
+  const result=await list(env);assert.equal(result.total,1);assert.equal(result.items[0].id,saved.id);
+  const plans=await original("EXPLAIN QUERY PLAN SELECT key FROM service_state WHERE key GLOB 'strategy_draft:*'").all();assert.ok(plans.results.some(p=>p.detail.includes('SEARCH')));
+});
