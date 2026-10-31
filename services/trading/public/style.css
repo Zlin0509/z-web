@@ -15,3 +15,6 @@
 @media(max-width:1150px){.studio-layout{grid-template-columns:245px minmax(0,1fr);gap:14px}.studio-editor .form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.studio-editor .form-grid>label.full{grid-column:span 1}.draft-heading{align-items:start;flex-direction:column;gap:8px}.draft-heading label{width:100%}.studio-editor>.panel{padding:18px}}
 @media(max-width:800px){.studio-layout{grid-template-columns:minmax(0,1fr)}.studio-library{position:static;max-height:none}.studio-library #library-list{max-height:320px;overflow:auto}.library-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}.studio-heading{align-items:start}.studio-heading .button{white-space:normal}.studio-editor .form-grid>button.full{grid-column:1/-1}.ai-actions .button{flex:1;white-space:normal}.draft-actions .button{flex:1;padding:10px 8px}.studio-editor .form-grid>label.full{grid-column:1/-1}}
 .strategy-studio [hidden]{display:none!important}
+
+/* Preserve the watchlist and snapshot during asset reads; keep feedback from shifting layout. */
+.stock-load-status{min-height:22px;margin:0 0 12px}#asset-detail{contain:layout style}
