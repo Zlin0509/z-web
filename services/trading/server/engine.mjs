@@ -1,3 +1,4 @@
+import {periodsPerYear,timeframeOf,MINUTE15,regularSession} from './timeframes.mjs';
 export class Problem extends Error { constructor(status,message){super(message);this.status=status;} }
 export const finite = x => typeof x==='number' && Number.isFinite(x);
 export function normalizeBars(input) {
@@ -44,7 +45,7 @@ function buildFeatureSeries(bars,p={fast:10,slow:30},market='crypto',latestOnly=
     if(i&&finite(f.rsi14[i-1]))f.rsi_change[i]=f.rsi14[i]-f.rsi14[i-1];
     if(i&&finite(f.macd_histogram[i-1]))f.macd_change[i]=f.macd_histogram[i]-f.macd_histogram[i-1];
     if(i>=19){const mid=f.sma20[i],std=Math.sqrt(c.slice(i-19,i+1).reduce((s,x)=>s+(x-mid)**2,0)/20);f.bollinger_upper[i]=mid+2*std;f.bollinger_lower[i]=mid-2*std;f.bollinger_width[i]=4*std/mid;f.bollinger_pct[i]=std>0?(c[i]-f.bollinger_lower[i])/(4*std):.5;}
-    if(i>=20){const ret=c.slice(i-19,i+1).map((x,j)=>Math.log(x/c[i-20+j])),avg=ret.reduce((a,b)=>a+b,0)/20;f.volatility20[i]=Math.sqrt(ret.reduce((s,x)=>s+(x-avg)**2,0)/19)*Math.sqrt(market==='crypto'?365:252);}
+    if(i>=20){const ret=c.slice(i-19,i+1).map((x,j)=>Math.log(x/c[i-20+j])),avg=ret.reduce((a,b)=>a+b,0)/20;f.volatility20[i]=Math.sqrt(ret.reduce((s,x)=>s+(x-avg)**2,0)/19)*Math.sqrt(periodsPerYear(market,timeframeOf(p)));}
     const hist=f.volatility20.slice(Math.max(0,i-99),i+1).filter(finite);if(hist.length>=20)f.vol_percentile[i]=hist.filter(x=>x<=f.volatility20[i]).length/hist.length;
   }
   return f;
@@ -66,8 +67,8 @@ export function validateRules(input){
   }return result;
 }
 export function config(input={}) {
-  const p={strategy:input.strategy??'ma',fast:Number(input.fast??10),slow:Number(input.slow??30),initial:Number(input.initial??10000),allocation:Number(input.allocation??0.25),feeBps:Number(input.feeBps??10),slippageBps:Number(input.slippageBps??5),maxDrawdown:Number(input.maxDrawdown??0.2)};
-    if(!['ma','rsi','breakout','custom'].includes(p.strategy)||!Number.isInteger(p.fast)||!Number.isInteger(p.slow)||p.fast<2||p.slow<=p.fast||p.slow>200||![p.initial,p.allocation,p.feeBps,p.slippageBps,p.maxDrawdown].every(finite)||p.initial<100||p.initial>1e9||p.allocation<=0||p.allocation>1||p.feeBps<0||p.feeBps>100||p.slippageBps<0||p.slippageBps>200||p.maxDrawdown<=0||p.maxDrawdown>0.9)throw new Problem(400,'策略参数不合法：短周期应小于长周期；仓位 0–100%，回撤阈值 0–90%。');if(p.strategy==='custom')p.rules=validateRules(input.rules);return p;
+  const p={timeframe:input.timeframe??'1d',strategy:input.strategy??'ma',fast:Number(input.fast??10),slow:Number(input.slow??30),initial:Number(input.initial??10000),allocation:Number(input.allocation??0.25),feeBps:Number(input.feeBps??10),slippageBps:Number(input.slippageBps??5),maxDrawdown:Number(input.maxDrawdown??0.2)};
+    if(!['1d','15m'].includes(p.timeframe)||!['ma','rsi','breakout','custom'].includes(p.strategy)||!Number.isInteger(p.fast)||!Number.isInteger(p.slow)||p.fast<2||p.slow<=p.fast||p.slow>200||![p.initial,p.allocation,p.feeBps,p.slippageBps,p.maxDrawdown].every(finite)||p.initial<100||p.initial>1e9||p.allocation<=0||p.allocation>1||p.feeBps<0||p.feeBps>100||p.slippageBps<0||p.slippageBps>200||p.maxDrawdown<=0||p.maxDrawdown>0.9)throw new Problem(400,'策略参数不合法：短周期应小于长周期；仓位 0–100%，回撤阈值 0–90%。');if(p.strategy==='custom')p.rules=validateRules(input.rules);return p;
 }
 export function targets(bars,p,market='crypto') {
   const close=bars.map(b=>b.close),fast=sma(close,p.fast),slow=sma(close,p.slow),rs=rsi(close);let held=false;
@@ -96,11 +97,12 @@ export function step(state,bar,want,p,copy=true) {
 }
 export function backtest(input,options={},market='crypto',evaluationStart=null) {
     const bars=normalizeBars(input),p=config(options),startIndex=evaluationStart===null?0:bars.findIndex(b=>b.time>=evaluationStart),warmup=Math.max(p.slow,35,startIndex<0?bars.length:startIndex);
-  if(bars.length<warmup+5)throw new Problem(400,`至少需要 ${warmup+5} 根日线，请增加数据或缩短长周期。`);
+  if(p.timeframe==='15m'&&bars.some(b=>b.time%MINUTE15!==0||b.time+MINUTE15>Date.now()||(market==='us'&&!regularSession(b.time))))throw new Problem(400,'15分钟样本必须是已完成、对齐周期且在常规交易时段内的K线。');
+  if(bars.length<warmup+5)throw new Problem(400,`至少需要 ${warmup+5} 根K线，请增加数据或缩短长周期。`);
   const signals=targets(bars,p,market);let state=startPortfolio(p);const curve=[{time:bars[warmup].time-1,equity:p.initial}];
   for(let i=warmup;i<bars.length;i++)state=step(state,bars[i],signals[i-1],p,false);
   state.curve=curve.concat(state.curve);const eq=state.curve.map(x=>x.equity);let peak=p.initial,maxDD=0;for(const v of eq){peak=Math.max(peak,v);maxDD=Math.max(maxDD,1-v/peak);}
   const returns=eq.slice(1).map((v,i)=>v/eq[i]-1),mean=returns.reduce((a,b)=>a+b,0)/returns.length,sd=Math.sqrt(returns.reduce((s,v)=>s+(v-mean)**2,0)/Math.max(1,returns.length-1)),closed=state.trades.filter(x=>x.side==='sell');
   const benchmarkStart=bars[warmup].open*(1+p.slippageBps/10000)*(1+p.feeBps/10000);const benchmark=state.curve.map((x,i)=>({time:x.time,equity:i?p.initial*bars[warmup+i-1].close/benchmarkStart:p.initial}));
-  return {config:p,market,start:bars[warmup].time,end:bars.at(-1).time,bars:bars.length,metrics:{totalReturn:eq.at(-1)/p.initial-1,benchmarkReturn:benchmark.at(-1).equity/p.initial-1,allocatedBenchmarkReturn:p.allocation*(benchmark.at(-1).equity/p.initial-1),maxDrawdown:maxDD,sharpe:sd>0?mean/sd*Math.sqrt(market==='crypto'?365:252):null,winRate:closed.length?closed.filter(x=>x.pnl>0).length/closed.length:null,closedTrades:closed.length,orders:state.trades.length,fees:state.fees,finalEquity:eq.at(-1),openUnits:state.units,halted:state.halted},curve:state.curve,benchmark,trades:state.trades,assumptions:'仅日线、多头、无杠杆；前一日收盘信号，次日开盘按滑点和手续费模拟成交；不计股息、税费和停牌流动性；期末持仓按收盘估值。'};
+  return {config:p,market,start:bars[warmup].time,end:bars.at(-1).time,bars:bars.length,metrics:{totalReturn:eq.at(-1)/p.initial-1,benchmarkReturn:benchmark.at(-1).equity/p.initial-1,allocatedBenchmarkReturn:p.allocation*(benchmark.at(-1).equity/p.initial-1),maxDrawdown:maxDD,sharpe:sd>0?mean/sd*Math.sqrt(periodsPerYear(market,timeframeOf(p))):null,winRate:closed.length?closed.filter(x=>x.pnl>0).length/closed.length:null,closedTrades:closed.length,orders:state.trades.length,fees:state.fees,finalEquity:eq.at(-1),openUnits:state.units,halted:state.halted},curve:state.curve,benchmark,trades:state.trades,assumptions:(p.timeframe==='15m'?'15分钟':'日线')+'、多头、无杠杆；上一根收盘信号，下一根开盘按滑点和手续费模拟成交；不计股息、税费和停牌流动性；期末持仓按收盘估值。'};
 }

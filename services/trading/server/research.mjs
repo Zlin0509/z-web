@@ -1,3 +1,5 @@
+import {timeframeOf,intradayGap} from './timeframes.mjs';
+import {readSeries} from './series.mjs';
 import {Problem,config,backtest,featureSeries,FEATURE_VERSION,finite,normalizeBars} from './engine.mjs';
 export const ENGINE_VERSION='daily-next-open-v2';
 export const PROMPT_VERSION='research-memory-v2';
@@ -8,7 +10,7 @@ export async function digest(value){return [...new Uint8Array(await crypto.subtl
 export async function readRecord(db,key){const r=await db.prepare('SELECT value FROM service_state WHERE key=?').bind(key).first();return r?JSON.parse(r.value):null;}
 export async function putRecord(db,key,value){await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key,JSON.stringify(value)).run();}
 export function splitPlan(bars){
-  if(bars.length<POLICY.minBars)throw new Problem(400,`AI 研究至少需要 ${POLICY.minBars} 根日线，以保留滚动验证和最终验收区间。`);
+  if(bars.length<POLICY.minBars)throw new Problem(400,`AI 研究至少需要 ${POLICY.minBars} 根K线，以保留滚动验证和最终验收区间。`);
   const developmentEnd=Math.floor(bars.length*.8),trainEnd=Math.floor(developmentEnd*.5),folds=[];
   for(let k=0;k<POLICY.folds;k++)folds.push({start:trainEnd+Math.floor((developmentEnd-trainEnd)*k/POLICY.folds),end:trainEnd+Math.floor((developmentEnd-trainEnd)*(k+1)/POLICY.folds)});
   return {developmentEnd,trainEnd,folds,maxSlow:Math.min(200,trainEnd-10)};
@@ -18,10 +20,10 @@ export function featureContext(bars,p,market){
   const window=['rsi14','macd_histogram','atr_pct','volatility20','rvol','return20','bollinger_width','sma_slope'];
   const summary=Object.fromEntries(window.map(k=>{const a=f[k].slice(-60).filter(finite);return [k,a.length?{min:Math.min(...a),max:Math.max(...a),mean:mean(a),observations:a.length}:null];}));
   const regime=(Math.abs(latest.sma_slope??0)>.01?'trend':'range')+((latest.volatility20??0)>0&&(latest.vol_percentile??0)>.8?':high_vol':':normal_vol');
-  return {version:FEATURE_VERSION,asOf:bars.at(-1).time,regime,latest,summary60:summary,recent:bars.slice(-10).map((b,j)=>({time:b.time,...Object.fromEntries(window.map(k=>[k,f[k][bars.length-10+j]??null]))})),units:'收益、波动、斜率和百分位使用小数；RSI 为0–100；trend_distance为ATR倍数；rvol为20日均量倍数。'};
+  return {version:FEATURE_VERSION,asOf:bars.at(-1).time,regime,latest,summary60:summary,recent:bars.slice(-10).map((b,j)=>({time:b.time,...Object.fromEntries(window.map(k=>[k,f[k][bars.length-10+j]??null]))})),units:'收益、波动、斜率和百分位使用小数；RSI 为0–100；trend_distance为ATR倍数；rvol为20根均量倍数。'};
 }
-export function auditData(bars,market,basis){
-  const warnings=[];let gaps=0,jumps=0;for(let i=1;i<bars.length;i++){if(bars[i].time-bars[i-1].time>(market==='crypto'?1.5:5)*86400000)gaps++;if(Math.abs(bars[i].open/bars[i-1].close-1)>.35)jumps++;}
+export function auditData(bars,market,basis,timeframe='1d'){
+  const warnings=[];let gaps=0,jumps=0;for(let i=1;i<bars.length;i++){if(timeframe==='15m'?intradayGap(bars[i-1].time,bars[i].time,market):bars[i].time-bars[i-1].time>(market==='crypto'?1.5:5)*86400000)gaps++;if(Math.abs(bars[i].open/bars[i-1].close-1)>.35)jumps++;}
   if(gaps)warnings.push(`发现 ${gaps} 处较长日期缺口，未填造行情。`);
   if(jumps)warnings.push(`发现 ${jumps} 处超过35%的隔夜跳变，需要检查拆股或异常数据。`);
   if(market==='us'&&basis!=='split')warnings.push('美股复权口径未核实，最终验收不会标为通过。');
@@ -52,7 +54,7 @@ export function evaluateCandidate(bars,baseline,candidate,market,plan){
 }
 // Memory is an explicit whitelist. Never serialize stored holdout results or model prose into prompts.
 export function memoryProjection(e,session,regime){
-  if(e.schemaVersion!==2||e.assetId!==session.assetId||e.source.provider!==session.source.provider||e.source.priceBasis!==session.source.priceBasis||e.outcomeEnd>session.bars[session.plan.developmentEnd-1].time||e.engineVersion!==ENGINE_VERSION||!e.evaluation)return null;
+  if(e.schemaVersion!==2||e.assetId!==session.assetId||timeframeOf(e.config)!==timeframeOf(session.source)||e.source.provider!==session.source.provider||e.source.priceBasis!==session.source.priceBasis||e.outcomeEnd>session.bars[session.plan.developmentEnd-1].time||e.engineVersion!==ENGINE_VERSION||!e.evaluation)return null;
   return {id:e.id,name:e.name,config:e.config,regime:e.regime,sameRegime:e.regime===regime,outcomeEnd:e.outcomeEnd,development:e.evaluation.aggregate,decision:e.evaluation.decision,reasons:e.evaluation.reasons,stress:e.evaluation.stress,observations:e.evaluation.aggregate.candidate.closedTrades};
 }
 export async function retrieveMemory(db,session,regime){
@@ -63,36 +65,36 @@ export async function retrieveMemory(db,session,regime){
 }
 export async function researchSession(db,asset){
   // One fixed holdout per instrument, independent of changed prompts, costs or source switches.
-  const key='research_active:'+asset.id,current=await readRecord(db,key);let old=current?await readRecord(db,'research_session:'+current.id):null;
+  const tf=timeframeOf(asset),key='research_active:'+asset.id+(tf==='15m'?':15m':''),current=await readRecord(db,key);let old=current?await readRecord(db,'research_session:'+current.id):null;
   const cached=await readRecord(db,'research_market:'+asset.id);
-  const useAdjusted=asset.source==='alpaca'&&cached?.source==='alpaca'&&cached.bars?.length>=240;
+  const useAdjusted=tf==='1d'&&asset.source==='alpaca'&&cached?.source==='alpaca'&&cached.bars?.length>=240;
   const input=useAdjusted?cached.bars:JSON.parse(asset.data);
   if(old&&!old.finalized&&!old.closed){
     if(old.trialCount<POLICY.maxTrials||input.filter(b=>b.time>old.bars.at(-1).time).length<60)return old;
-    old.closed={created:new Date().toISOString(),reason:'预算用尽且已有60根新日线；旧窗口未执行最终验收'};await putRecord(db,'research_session:'+old.id,old);
+    old.closed={created:new Date().toISOString(),reason:'预算用尽且已有60根新K线；旧窗口未执行最终验收'};await putRecord(db,'research_session:'+old.id,old);
   }
   const bars=normalizeBars(input);
-  if(old&&bars.filter(b=>b.time>old.bars.at(-1).time).length<60)throw new Problem(409,'本研究已完成最终验收；至少积累60根新的日线后才开启下一研究窗口，避免重复使用验收数据。');
+  if(old&&bars.filter(b=>b.time>old.bars.at(-1).time).length<60)throw new Problem(409,'本研究已完成最终验收；至少积累60根新的同周期K线后才开启下一研究窗口，避免重复使用验收数据。');
   const plan=splitPlan(bars);if(old){const next=Math.max(plan.developmentEnd,bars.findIndex(b=>b.time>old.bars.at(-1).time));plan.developmentEnd=next;plan.trainEnd=Math.floor(next*.5);plan.maxSlow=Math.min(200,plan.trainEnd-10);plan.folds=Array.from({length:3},(_,k)=>({start:plan.trainEnd+Math.floor((next-plan.trainEnd)*k/3),end:plan.trainEnd+Math.floor((next-plan.trainEnd)*(k+1)/3)}));}
   const priceBasis=useAdjusted?'split':asset.market==='crypto'?'spot':'unverified';
-  const source={provider:asset.source,symbol:asset.symbol,updated:useAdjusted?cached.updated:asset.updated,priceBasis};
-  const session={id:crypto.randomUUID(),assetId:asset.id,market:asset.market,created:new Date().toISOString(),source,bars,plan,datasetHash:await digest({bars,source:source.provider,priceBasis}),audit:auditData(bars,asset.market,priceBasis),trialCount:0,finalized:null};
+  const source={...(tf==='15m'?{timeframe:tf}:{}),provider:asset.source,symbol:asset.symbol,updated:useAdjusted?cached.updated:asset.updated,priceBasis};
+  const session={id:crypto.randomUUID(),assetId:asset.id,market:asset.market,created:new Date().toISOString(),source,bars,plan,datasetHash:await digest({bars,source:source.provider,priceBasis}),audit:auditData(bars,asset.market,priceBasis,tf),trialCount:0,finalized:null};
   await db.batch([db.prepare('INSERT INTO service_state(key,value) VALUES(?,?)').bind('research_session:'+session.id,JSON.stringify(session)),db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key,JSON.stringify({id:session.id}))]);return session;
 }
 export function sessionInfo(s){return {id:s.id,datasetHash:s.datasetHash,source:s.source,created:s.created,bars:s.bars.length,developmentEnd:s.bars[s.plan.developmentEnd-1].time,holdoutStart:s.bars[s.plan.developmentEnd].time,holdoutEnd:s.bars.at(-1).time,holdoutBars:s.bars.length-s.plan.developmentEnd,trialCount:s.trialCount,maxTrials:POLICY.maxTrials,audit:s.audit,closed:s.closed??null,finalized:s.finalized};}
 export async function marketContext(db,asset,bars){
   const reference=asset.market==='us'?'us:SPY':'crypto:BTC-USDT';
-  const cached=asset.market==='us'?await readRecord(db,'research_market:'+reference):null;
-  const raw=!cached&&asset.market==='crypto'?await db.prepare('SELECT data FROM assets WHERE id=?').bind(reference).first():null;
+  const intraday=timeframeOf(asset)==='15m',cached=intraday?await readSeries(db,reference):asset.market==='us'?await readRecord(db,'research_market:'+reference):null;
+  const raw=!intraday&&!cached&&asset.market==='crypto'?await db.prepare('SELECT data FROM assets WHERE id=?').bind(reference).first():null;
   const benchmark=cached?.bars||(raw?JSON.parse(raw.data):[]),byTime=new Map(benchmark.map(b=>[b.time,b.close]));
   const aligned=bars.filter(b=>byTime.has(b.time)).slice(-61);
   if(reference===asset.id||aligned.length<21)return {reference,available:false,reason:'同标的或本地对齐基准不足21根，不推测缺失值'};
   const first=aligned[0],last=aligned.at(-1),a=[],b=[];for(let i=1;i<aligned.length;i++){a.push(aligned[i].close/aligned[i-1].close-1);b.push(byTime.get(aligned[i].time)/byTime.get(aligned[i-1].time)-1);}
   const ma=mean(a),mb=mean(b),cov=mean(a.map((v,i)=>(v-ma)*(b[i]-mb))),va=mean(a.map(v=>(v-ma)**2)),vb=mean(b.map(v=>(v-mb)**2));
-  return {reference,available:true,asOf:last.time,observations:a.length,relativeReturn:(last.close/first.close-1)-(byTime.get(last.time)/byTime.get(first.time)-1),beta:vb>0?cov/vb:null,correlation:va>0&&vb>0?cov/Math.sqrt(va*vb):null,source:cached?'alpaca IEX split':'local daily'};
+  return {reference,available:true,asOf:last.time,observations:a.length,relativeReturn:(last.close/first.close-1)-(byTime.get(last.time)/byTime.get(first.time)-1),beta:vb>0?cov/vb:null,correlation:va>0&&vb>0?cov/Math.sqrt(va*vb):null,source:intraday?'local 15m':cached?'alpaca IEX split':'local daily'};
 }
 export async function executionMemory(db,session){
   const end=session.bars[session.plan.developmentEnd-1].time;
   const rows=(await db.prepare('SELECT id,data FROM paper_sessions WHERE asset_id=? ORDER BY created DESC LIMIT 10').bind(session.assetId).all()).results;
-  return rows.map(row=>{const d=JSON.parse(row.data),trades=(d.portfolio?.trades||[]).filter(t=>t.time<=end),closed=trades.filter(t=>t.side==='sell');return {id:row.id,kind:'local_simulation_not_broker_fills',asOf:trades.at(-1)?.time,orders:trades.length,closedTrades:closed.length,realizedPnl:closed.reduce((s,t)=>s+t.pnl,0),fees:trades.reduce((s,t)=>s+t.fee,0),config:d.config};}).filter(x=>x.orders).slice(0,3);
+  return rows.filter(row=>timeframeOf(JSON.parse(row.data).config)===timeframeOf(session.source)).map(row=>{const d=JSON.parse(row.data),trades=(d.portfolio?.trades||[]).filter(t=>t.time<=end),closed=trades.filter(t=>t.side==='sell');return {id:row.id,kind:'local_simulation_not_broker_fills',asOf:trades.at(-1)?.time,orders:trades.length,closedTrades:closed.length,realizedPnl:closed.reduce((s,t)=>s+t.pnl,0),fees:trades.reduce((s,t)=>s+t.fee,0),config:d.config};}).filter(x=>x.orders).slice(0,3);
 }

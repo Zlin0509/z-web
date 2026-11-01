@@ -1,3 +1,5 @@
+import {strategyAsset,seriesKey} from './series.mjs';
+import {timeframeOf,MINUTE15,intradayGap,regularSession} from './timeframes.mjs';
 import {Problem,indicators,config,backtest,targets,startPortfolio,step} from './engine.mjs';
 import {loadMarket,marketSource} from './providers.mjs';
 const now=()=>new Date().toISOString();
@@ -34,12 +36,13 @@ export async function addAsset(db,input){
   const count=await db.prepare('SELECT count(*) AS n FROM assets').first();if(count.n>=12)throw new Problem(400,'第一版最多跟踪 12 个标的。');
   try{await db.prepare('INSERT INTO assets (id,symbol,market,source) VALUES (?,?,?,?)').bind(market+':'+symbol,symbol,market,source).run();}catch(e){if(/UNIQUE/.test(String(e)))throw new Problem(409,'这个标的已在列表中。');throw e;}
 }
-export async function importBars(db,id,bars,revision){const a=await assetById(db,id);if(!Number.isInteger(revision))throw new Problem(400,'缺少版本号。');const r=await db.prepare("UPDATE assets SET data=?,source='csv',status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(bars),now(),id,revision).run();if(r.meta.changes!==1)throw new Problem(409,'数据已更新，请刷新后再导入。');await db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE asset_id=? AND status='running'").bind(id).run();await log(db,'import',{symbol:a.symbol,bars:bars.length,activePaper:'paused'});}
+export async function importBars(db,id,bars,revision){const a=await assetById(db,id);if(!Number.isInteger(revision))throw new Problem(400,'缺少版本号。');const r=await db.prepare("UPDATE assets SET data=?,source='csv',status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(bars),now(),id,revision).run();if(r.meta.changes!==1)throw new Problem(409,'数据已更新，请刷新后再导入。');await db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE asset_id=? AND status='running' AND COALESCE(json_extract(data,'$.config.timeframe'),'1d')='1d'").bind(id).run();await log(db,'import',{symbol:a.symbol,bars:bars.length,activePaper:'paused'});}
 export async function removeAsset(db,id,revision){
   const asset=await assetById(db,id);if(!Number.isInteger(revision))throw new Problem(400,'缺少标的版本号，请刷新后再试。');
   const result=await db.batch([
     db.prepare('DELETE FROM assets WHERE id=? AND revision=?').bind(id,revision),
-    db.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id=? AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id)
+    db.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id=? AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id),
+    db.prepare('DELETE FROM service_state WHERE key=? AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)').bind(seriesKey(id),id)
   ]);
   if(result[0].meta.changes!==1)throw new Problem(409,'标的数据已更新，请刷新后再删除。');
   await log(db,'asset_removed',{symbol:asset.symbol,stopped:result[1].meta.changes,history:'retained'});
@@ -50,30 +53,33 @@ export async function removeAssets(db,input){
   const ids=input.map(x=>x.assetId),placeholders=ids.map(()=>'?').join(','),guard=input.map(()=>'(id=? AND revision=?)').join(' OR ');
   const result=await db.batch([
     db.prepare(`DELETE FROM assets WHERE id IN (${placeholders}) AND (SELECT count(*) FROM assets WHERE ${guard})=?`).bind(...ids,...input.flatMap(x=>[x.assetId,x.revision]),input.length),
-    db.prepare(`UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id IN (${placeholders}) AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE assets.id=paper_sessions.asset_id)`).bind(...ids)
+    db.prepare(`UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id IN (${placeholders}) AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE assets.id=paper_sessions.asset_id)`).bind(...ids),
+    db.prepare("DELETE FROM service_state WHERE key GLOB 'market_series:15m:*' AND json_extract(value,'$.assetId') IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM assets WHERE id=json_extract(service_state.value,'$.assetId'))").bind(JSON.stringify(ids))
   ]);
   if(result[0].meta.changes!==ids.length)throw new Problem(409,'列表数据已更新，本次未删除；请读取数据库后重新勾选。');
   await log(db,'asset_removed',{symbols:ids.map(x=>x.split(':')[1]),stopped:result[1].meta.changes,history:'retained'});return {ok:true,removed:ids,stopped:result[1].meta.changes};
 }
-export async function runBacktest(db,id,options){const a=await assetById(db,id);const result=backtest(JSON.parse(a.data),options,a.market);result.source={provider:a.source,updated:a.updated,symbol:a.symbol,priceBasis:a.market==='us'?'未保证复权；跨拆股区间需自行导入一致复权 OHLC':'现货日线'};const run={id:crypto.randomUUID(),created:now(),asset_id:id,result};await db.prepare('INSERT INTO backtests (id,asset_id,created,result) VALUES (?,?,?,?)').bind(run.id,id,run.created,JSON.stringify(result)).run();await log(db,'backtest',{symbol:a.symbol,id:run.id,return:result.metrics.totalReturn});return run;}
-export async function startPaper(db,id,options){const a=await assetById(db,id),bars=JSON.parse(a.data),p=config(options);if(a.source==='csv')throw new Problem(400,'模拟运行需要联网行情；CSV 用于离线回测。');if(bars.length<Math.max(p.slow,35)+5)throw new Problem(400,'请先同步足够日线数据。');if(Date.now()-bars.at(-1).time>(a.market==='crypto'?3:7)*86400000)throw new Problem(409,'行情过旧，请先刷新数据。');
+export async function runBacktest(db,id,options){const a=await strategyAsset(db,id,timeframeOf(options));const result=backtest(JSON.parse(a.data),options,a.market);result.source={timeframe:a.timeframe,provider:a.source,updated:a.updated,symbol:a.symbol,priceBasis:a.market==='us'?'未保证复权；跨拆股区间需一致复权 OHLC':a.timeframe==='15m'?'现货15分钟':'现货日线'};const run={id:crypto.randomUUID(),created:now(),asset_id:id,result};await db.prepare('INSERT INTO backtests (id,asset_id,created,result) VALUES (?,?,?,?)').bind(run.id,id,run.created,JSON.stringify(result)).run();await log(db,'backtest',{symbol:a.symbol,id:run.id,return:result.metrics.totalReturn});return run;}
+export async function startPaper(db,id,options){const p=config(options),a=await strategyAsset(db,id,p.timeframe),bars=JSON.parse(a.data);if(a.source==='csv')throw new Problem(400,'模拟运行需要联网行情；CSV 用于离线回测。');if(bars.length<Math.max(p.slow,35)+5)throw new Problem(400,'请先同步足够的对应周期K线。');if(p.timeframe==='15m'&&((a.market==='crypto'||regularSession(Date.now()))&&Date.now()-bars.at(-1).time>3*MINUTE15))throw new Problem(409,'15分钟行情过旧，请先准备周期数据。');if(Date.now()-bars.at(-1).time>(a.market==='crypto'?3:7)*86400000)throw new Problem(409,'行情过旧，请先刷新数据。');
   const active=await db.prepare("SELECT count(*) AS n FROM paper_sessions WHERE status='running'").first();if(active.n>=6)throw new Problem(409,'最多同时运行 6 个模拟策略。');
   const idNew=crypto.randomUUID(),portfolio=startPortfolio(p);portfolio.lastTime=bars.at(-1).time;
-  const data={config:p,portfolio,started:now()};const created=await db.prepare("INSERT INTO paper_sessions (id,asset_id,created,status,data) SELECT ?,?,?,'running',? WHERE EXISTS(SELECT 1 FROM assets WHERE id=? AND revision=?)").bind(idNew,id,now(),JSON.stringify(data),id,a.revision).run();if(created.meta.changes!==1)throw new Problem(409,'标的已删除或数据已变化，请刷新后再启动。');await log(db,'paper_started',{id:idNew,symbol:a.symbol});return idNew;
+  const data={config:p,portfolio,started:now()};const created=await db.prepare("INSERT INTO paper_sessions (id,asset_id,created,status,data) SELECT ?,?,?,'running',? WHERE EXISTS(SELECT 1 FROM assets WHERE id=? AND revision=?) AND (?='1d' OR EXISTS(SELECT 1 FROM service_state WHERE key=? AND json_extract(value,'$.generation')=? AND json_extract(value,'$.revision')=?))").bind(idNew,id,now(),JSON.stringify(data),id,a.revision,p.timeframe,seriesKey(id),a.seriesGeneration??'',a.seriesRevision??0).run();if(created.meta.changes!==1)throw new Problem(409,'标的已删除或数据已变化，请刷新后再启动。');await log(db,'paper_started',{id:idNew,symbol:a.symbol});return idNew;
 }
-async function advancePaper(db,asset,bars){
+export async function advancePaper(db,asset,bars){
+  if(!bars.length)return;
   const sessions=(await db.prepare("SELECT * FROM paper_sessions WHERE asset_id=? AND status='running'").bind(asset.id).all()).results;
-  for(const session of sessions){const data=JSON.parse(session.data),signal=targets(bars,data.config,asset.market);let portfolio=data.portfolio;let missing=portfolio.lastTime<bars[0].time;
+  for(const session of sessions){const data=JSON.parse(session.data);if(timeframeOf(data.config)!==timeframeOf(asset)||data.portfolio.lastTime>=bars.at(-1).time)continue;const signal=targets(bars,data.config,asset.market);let portfolio=data.portfolio;let missing=portfolio.lastTime<bars[0].time;if(timeframeOf(data.config)==='15m')missing=missing||!bars.some(b=>b.time===portfolio.lastTime)||bars.some((b,i)=>i&&b.time>portfolio.lastTime&&intradayGap(bars[i-1].time,b.time,asset.market));
     if(missing){await db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE id=? AND revision=?").bind(session.id,session.revision).run();await log(db,'paper_gap',{id:session.id,message:'缺失历史 K 线，已暂停，未推测成交。'});continue;}
     for(let i=1;i<bars.length;i++)if(bars[i].time>portfolio.lastTime)portfolio=step(portfolio,bars[i],signal[i-1],data.config);
     if(portfolio.lastTime===data.portfolio.lastTime)continue;
     data.portfolio=portfolio;const newOrders=portfolio.trades.filter(t=>t.time>JSON.parse(session.data).portfolio.lastTime);
+    if(timeframeOf(data.config)==='15m'){portfolio.curve=portfolio.curve.slice(-2000);portfolio.trades=portfolio.trades.slice(-1000);}
     const r=await db.prepare('UPDATE paper_sessions SET data=?,status=?,revision=revision+1 WHERE id=? AND revision=?').bind(JSON.stringify(data),portfolio.halted?'halted':'running',session.id,session.revision).run();if(r.meta.changes===1)await log(db,'paper_advanced',{id:session.id,orders:newOrders,mode:'paper',halted:portfolio.halted});
   }
 }
-export async function archiveBars(db,id,source,bars){
-  const years=new Map();for(const bar of bars){const year=new Date(bar.time).getUTCFullYear();if(!years.has(year))years.set(year,[]);years.get(year).push(bar);}
-  for(const [year,items] of years){const key='history:'+id+':'+source+':'+year,row=await db.prepare('SELECT value FROM service_state WHERE key=?').bind(key).first();const saved=row?JSON.parse(row.value):[];const merged=[...new Map([...saved,...items].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time);const value=JSON.stringify(merged);if(row?.value===value)continue;await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key,value).run();}
+export async function archiveBars(db,id,source,bars,timeframe='1d'){
+  const years=new Map();for(const bar of bars){const year=timeframe==='15m'?new Date(bar.time).toISOString().slice(0,7):new Date(bar.time).getUTCFullYear();if(!years.has(year))years.set(year,[]);years.get(year).push(bar);}
+  for(const [year,items] of years){const key='history:'+(timeframe==='15m'?'15m:':'')+id+':'+source+':'+year,row=await db.prepare('SELECT value FROM service_state WHERE key=?').bind(key).first();const saved=row?JSON.parse(row.value):[];const merged=[...new Map([...saved,...items].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time);const value=JSON.stringify(merged);if(row?.value===value)continue;await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(key,value).run();}
 }
 export async function refresh(db,env,id=null,fetcher=fetch){
   const lease=crypto.randomUUID(),expires=Date.now()+300000;
@@ -94,7 +100,7 @@ export async function refresh(db,env,id=null,fetcher=fetch){
       await archiveBars(db,asset.id,asset.source,old);
       const incoming=await loadMarket({...asset,since:!changed?latest:null},{...env,DB:db},fetcher),merged=[...new Map([...(changed?[]:old),...incoming].map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);
       const update=db.prepare("UPDATE assets SET data=?,source=?,status='ready',message=NULL,updated=?,revision=revision+1 WHERE id=? AND revision=?").bind(JSON.stringify(merged),source,now(),asset.id,asset.revision);
-      const r=changed?(await db.batch([update,db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE asset_id=? AND status='running' AND EXISTS(SELECT 1 FROM assets WHERE id=? AND source=? AND revision=?)").bind(asset.id,asset.id,source,asset.revision+1)]))[0]:await update.run();
+      const r=changed?(await db.batch([update,db.prepare("UPDATE paper_sessions SET status='paused',revision=revision+1 WHERE asset_id=? AND status='running' AND COALESCE(json_extract(data,'$.config.timeframe'),'1d')='1d' AND EXISTS(SELECT 1 FROM assets WHERE id=? AND source=? AND revision=?)").bind(asset.id,asset.id,source,asset.revision+1)]))[0]:await update.run();
       if(r.meta.changes!==1){report.push({symbol:asset.symbol,status:'conflict'});continue;}
       await archiveBars(db,asset.id,source,incoming);
       await db.prepare('INSERT INTO service_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind('daily_check:'+asset.id,JSON.stringify({source,time:Date.now()})).run();

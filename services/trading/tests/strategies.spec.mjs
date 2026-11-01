@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {config} from '../server/engine.mjs';
+import {config,backtest} from '../server/engine.mjs';
 import {evaluateCandidate,splitPlan} from '../server/research.mjs';
 const day=86400000;
 const bars=Array.from({length:240},(_,i)=>{const c=100+i*.1+8*Math.sin(i/8);return {time:Date.UTC(2025,0,1)+i*day,open:c-.4,close:c,high:c+2,low:c-2,volume:1000+i};});
@@ -33,4 +33,53 @@ test('AI candidate review creates a separate editable draft and preserves finali
   await page.getByRole('button',{name:'运行回测',exact:false}).click();await expect(page.locator('#notice')).toContainText('回测已完成');
   const final={experimentId:'mock',decision:'rejected',reasons:['最终验收平仓不足5次'],candidate:{totalReturn:.01,maxDrawdown:.02,closedTrades:1},baseline:{totalReturn:.03},next:'至少60根新日线'};await page.route('**/api/strategies/finalize',r=>r.fulfill({json:final}));page.once('dialog',d=>d.accept());await page.locator('#finalize-research').click();await expect(page.locator('#holdout-result')).toContainText('未通过 / 证据不足');await expect(page.locator('#finalize-research')).toBeDisabled();
   await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:'/tmp/zlin-studio-ai-'+info.project.name+'.png',fullPage:true});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);expect(errors).toEqual([]);
+});
+
+test('15-minute selection persists across drafts and versions and reaches preparation, backtest and AI requests',async({page},info)=>{
+  await enter(page);
+  await page.locator('#new-draft').click();
+  const name='15分钟策略 '+info.project.name+' '+Date.now();
+  await page.locator('#draft-name').fill(name);
+  await page.locator('[name="assetId"]').selectOption('crypto:BTC-USDT');
+  await page.locator('[name="timeframe"]').selectOption('15m');
+  await expect(page.locator('#draft-state')).toContainText('已保存到数据库');
+  await page.reload();
+  await expect(page.locator('[name="timeframe"]')).toHaveValue('15m');
+  let prepared;
+  await page.route('**/api/market-series',async route=>{
+    prepared=route.request().postDataJSON();
+    await route.fulfill({json:{status:'ready',bars:900,asOf:Date.now()-1800000,timeframe:'15m'}});
+  });
+  await page.locator('#prepare-series').click();
+  await expect(page.locator('#notice')).toContainText('15分钟数据已准备');
+  expect(prepared).toEqual({assetId:'crypto:BTC-USDT',timeframe:'15m'});
+  await page.locator('#save-strategy').click();
+  await expect(page.locator('#strategy-status')).toContainText('版本已保存');
+  await page.locator('#library-search').fill(name);
+  await card(page,name).locator('[data-item-open]').click();
+  await expect(page.locator('[name="timeframe"]')).toHaveValue('15m');
+  // The backend integration tests exercise real stored series. Here responses are
+  // fixtures so browser QA never depends on external market data or AI services.
+  let backtestInput,aiInput;
+  await page.route('**/api/backtest',async route=>{
+    backtestInput=route.request().postDataJSON();
+    const end=Math.floor(Date.now()/900000)*900000;
+    const minuteBars=bars.map((bar,i)=>({...bar,time:end-(bars.length-i)*900000}));
+    const result=backtest(minuteBars,backtestInput.config,'crypto');
+    result.source={symbol:'BTC-USDT',provider:'okx',timeframe:'15m',priceBasis:'现货15分钟'};
+    await route.fulfill({status:201,json:{id:'browser-15m',asset_id:'crypto:BTC-USDT',result}});
+  });
+  await page.getByRole('button',{name:'运行回测',exact:false}).click();
+  await expect(page.locator('#notice')).toContainText('回测已完成');
+  await expect(page.getByRole('heading',{name:'BTC-USDT · 15分钟 · 双均线趋势'})).toBeVisible();
+  expect(backtestInput.config.timeframe).toBe('15m');
+  await page.route('**/api/strategies/propose',async route=>{
+    aiInput=route.request().postDataJSON();
+    await route.fulfill({status:409,json:{error:'15分钟AI测试请求已收到'}});
+  });
+  await page.locator('#strategy-goal').fill('以15分钟信号减少换手');
+  await page.locator('#ai-optimize').click();
+  await expect(page.locator('#strategy-status')).toContainText('15分钟AI测试请求已收到');
+  expect(aiInput.config.timeframe).toBe('15m');
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
 });

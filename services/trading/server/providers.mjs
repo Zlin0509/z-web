@@ -1,3 +1,4 @@
+import {MINUTE15,regularSession} from './timeframes.mjs';
 import { Problem, normalizeBars, finite } from './engine.mjs';
 import {marketFetch} from './market-http.mjs';
 async function getJSON(url,options={},fetcher=fetch,env={}) {
@@ -7,6 +8,7 @@ async function getJSON(url,options={},fetcher=fetch,env={}) {
 }
 export function marketSource(asset,env){return asset.source==='csv'?'csv':asset.market==='crypto'?'okx':env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY?'alpaca':'alpha';}
 export async function loadMarket(asset,env,fetcher=fetch) {
+  if(asset.timeframe==='15m')return loadIntraday(asset,env,fetcher);
   if(asset.source==='csv')throw new Problem(409,'CSV 数据通过文件更新，不进行联网刷新。');
   if(asset.market==='crypto') {
     const url=new URL('https://www.okx.com/api/v5/market/candles');url.search=new URLSearchParams({instId:asset.symbol,bar:'1Dutc',limit:String(asset.since?Math.min(300,Math.max(3,Math.ceil((Date.now()-asset.since)/86400000)+2)):300)});
@@ -56,3 +58,33 @@ export async function okxAccount(env,fetcher=fetch) {
 // Real-order execution is deliberately unavailable in this first release.
 // A future broker adapter must implement idempotency, reconciliation and explicit risk controls.
 export function executeLiveOrder(){throw new Problem(409,'实盘执行器尚未启用。当前所有策略成交均为模拟，不会向 OKX 或券商下单。');}
+
+export async function loadIntraday(asset,env,fetcher=fetch){
+  const end=asset.cutoff??Math.floor(Date.now()/MINUTE15)*MINUTE15,rows=[];
+  if(asset.market==='crypto'){
+    const url=new URL('https://www.okx.com/api/v5/market/history-candles');url.search=new URLSearchParams({instId:asset.symbol,bar:'15m',limit:'300'});
+    let previous=Infinity;
+    for(let page=0;page<4;page++){
+      const data=await getJSON(url,{},fetcher,env);if(data.code!=='0'||!Array.isArray(data.data))throw new Problem(502,'OKX 未返回15分钟行情。');
+      if(!data.data.length)break;
+      for(const x of data.data)if(x[8]==='1'&&Number(x[0])+MINUTE15<=end)rows.push({time:Number(x[0]),open:+x[1],high:+x[2],low:+x[3],close:+x[4],volume:+x[5]});
+      const oldest=Math.min(...data.data.map(x=>Number(x[0])));if(!Number.isFinite(oldest)||oldest>=previous)throw new Problem(502,'OKX 分页未向历史推进。');previous=oldest;
+      if(asset.since&&oldest<=asset.since-2*MINUTE15)break;if(!asset.since&&rows.length>=900)break;
+      url.searchParams.set('after',String(oldest));
+    }
+  }else{
+    if(!env.ALPACA_API_KEY||!env.ALPACA_SECRET_KEY)throw new Problem(424,'美股15分钟行情需要配置 Alpaca Key/Secret；不使用日线代替。');
+    const url=new URL('https://data.alpaca.markets/v2/stocks/'+encodeURIComponent(asset.symbol)+'/bars');
+    url.search=new URLSearchParams({timeframe:'15Min',feed:'iex',adjustment:'raw',sort:'asc',limit:'10000',start:new Date(asset.since?Math.max(asset.since-2*MINUTE15,Date.now()-30*86400000):Date.now()-30*86400000).toISOString(),end:new Date(end-1).toISOString()});
+    for(let page=0;page<4;page++){
+      const data=await getJSON(url,{headers:{'APCA-API-KEY-ID':env.ALPACA_API_KEY,'APCA-API-SECRET-KEY':env.ALPACA_SECRET_KEY}},fetcher,env);
+      if(!Array.isArray(data.bars))throw new Problem(502,'Alpaca 未返回15分钟行情。');
+      for(const b of data.bars){const time=Date.parse(b.t);if(time+MINUTE15<=end&&regularSession(time))rows.push({time,open:b.o,high:b.h,low:b.l,close:b.c,volume:b.v});}
+      if(!data.next_page_token)break;if(page===3)throw new Problem(502,'15分钟行情分页未完成，已保留旧数据。');url.searchParams.set('page_token',data.next_page_token);
+    }
+  }
+  const bars=[...new Map(rows.map(b=>[b.time,b])).values()].sort((a,b)=>a.time-b.time).slice(-2000);
+  if(bars.some(b=>b.time%MINUTE15!==0))throw new Problem(502,'数据源返回未对齐的15分钟K线。');
+  if(!bars.length)return [];if(bars.length===1){normalizeBars([bars[0],{...bars[0],time:bars[0].time-MINUTE15}]);return bars;}
+  return normalizeBars(bars);
+}
