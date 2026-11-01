@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import {DatabaseSync} from 'node:sqlite';
-import {putSecret,getSecret,saveSettings,settings,configured,orderPayload,previewOrder,submitOrder,beginOAuth,finishOAuth,deepseekModels} from '../server/connections.mjs';
-function setup(t){const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE service_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)');t.after(()=>db.close());const DB={prepare(q){let args=[];return {bind(...a){args=a;return this;},first(){return db.prepare(q).get(...args)},all(){return {results:db.prepare(q).all(...args)}},run(){return {meta:{changes:Number(db.prepare(q).run(...args).changes)}}}}}};return {DB,CONFIG_ENCRYPTION_KEY:Buffer.alloc(32,7).toString('base64')};}
+import {putSecret,getSecret,saveSettings,settings,configured,orderPayload,previewOrder,submitOrder,beginOAuth,finishOAuth,deepseekModels,reconcileOrder} from '../server/connections.mjs';
+function setup(t){const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE service_state(key TEXT PRIMARY KEY,value TEXT NOT NULL)');t.after(()=>db.close());const DB={prepare(q){let args=[];return {bind(...a){args=a;return this;},first(){return db.prepare(q).get(...args)},all(){return {results:db.prepare(q).all(...args)}},run(){return {meta:{changes:Number(db.prepare(q).run(...args).changes)}}}}},batch(statements){db.exec('BEGIN');try{const result=statements.map(s=>s.run());db.exec('COMMIT');return result;}catch(e){db.exec('ROLLBACK');throw e;}}};return {DB,CONFIG_ENCRYPTION_KEY:Buffer.alloc(32,7).toString('base64')};}
 test('DeepSeek model discovery uses the saved key and only returns models supplied by the API',async()=>{
   await assert.rejects(()=>deepseekModels({}),e=>e.status===424);
   const result=await deepseekModels({DEEPSEEK_API_KEY:'test-key'},async(url,options)=>{
@@ -27,16 +27,19 @@ test('Schwab submission claims a preview once and never retries uncertain orders
   t.mock.method(globalThis,'fetch',async(url,options)=>{
     assert.equal(options.headers.Authorization,'Bearer fake-test-token');
     if(url.endsWith('/accounts/accountNumbers'))return Response.json([{hashValue:'testaccount'}]);
+    if(url.endsWith('/accounts/testaccount?fields=positions'))return Response.json({securitiesAccount:{currentBalances:{cashAvailableForTrading:10000},positions:[]}});
+    if(url.endsWith('/orders/123'))return Response.json({orderId:123,status:'FILLED'});
     assert.equal(url,'https://api.schwabapi.com/trader/v1/accounts/testaccount/orders');
     assert.equal(options.method,'POST');posts++;
     assert.equal(JSON.parse(options.body).orderType,'LIMIT');
     if(fail)throw Error('network failed after send');
-    return new Response(null,{status:201,headers:{Location:'/orders/123'}});
+    return new Response(null,{status:201,headers:{Location:'https://api.schwabapi.com/trader/v1/accounts/testaccount/orders/123'}});
   });
   const input={account:'testaccount',symbol:'AAPL',quantity:1,price:100,side:'BUY'};
   const first=await previewOrder(env,input);
   assert.equal((await submitOrder(env,{id:first.id,confirm:'SUBMIT_LIVE_ORDER'})).status,'accepted');
   await assert.rejects(()=>submitOrder(env,{id:first.id,confirm:'SUBMIT_LIVE_ORDER'}),/已提交/);
+  await reconcileOrder(env,{id:first.id});
   fail=true;const second=await previewOrder(env,input);
   await assert.rejects(()=>submitOrder(env,{id:second.id,confirm:'SUBMIT_LIVE_ORDER'}),/禁止自动重试/);
   await assert.rejects(()=>submitOrder(env,{id:second.id,confirm:'SUBMIT_LIVE_ORDER'}),/已提交/);

@@ -42,6 +42,7 @@ export async function handleRequest(request,env,user){
     if(path==='/api/strategies'&&request.method==='GET')return json(await listStrategies(env));
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
+    if(path==='/api/schwab/activity'&&request.method==='GET')return json(await connections.operationHistory(env));
     if(path==='/api/quotes'&&request.method==='GET')return json(await readQuotes(env));
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
     if(path==='/api/state'&&request.method==='GET'){const status=await connections.settings(env);return json(await state(env.DB,{...env,...status.configured,DEEPSEEK_MODEL:status.model},new URL(request.url).searchParams.get('asset')));}
@@ -68,6 +69,7 @@ export async function handleRequest(request,env,user){
     if(path==='/api/schwab/orders')return json(await connections.orders(env,input.account));
     if(path==='/api/schwab/preview')return json(await connections.previewOrder(env,input));
     if(path==='/api/schwab/submit')return json(await connections.submitOrder(env,input));
+    if(path==='/api/schwab/reconcile')return json(await connections.reconcileOrder(env,input));
     if(path==='/api/schwab/cancel')return json(await connections.cancelOrder(env,input));
     if(path==='/api/assets/remove')return json(input.assets?await removeAssets(env.DB,input.assets):await removeAsset(env.DB,input.assetId,input.revision));
     if(path==='/api/assets'){await addAsset(env.DB,input);if(input.market==='us')await rememberStock(env.DB,String(input.symbol).trim().toUpperCase());return json({ok:true},201);}

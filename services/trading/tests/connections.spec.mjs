@@ -30,3 +30,26 @@ test('owner can save secrets without reading them back and sees persisted quote 
   await page.screenshot({path:'/tmp/zlin-connections-'+info.project.name+'.png',fullPage:true});
   expect(errors).toEqual([]);
 });
+
+test('Schwab order edits invalidate previews and owner can inspect and reconcile operations',async({page})=>{
+  let previews=0,submits=0;
+  await page.route('**/api/settings',r=>r.fulfill({json:{configured:{},model:'',schwabConnected:false,schwabAuth:{state:'reauth_required'},liveTrading:true}}));
+  await page.route('**/api/schwab/accounts',r=>r.fulfill({json:{accounts:[],numbers:[{hashValue:'testaccount',accountNumber:'12345678'}]}}));
+  await page.route('**/api/schwab/preview',r=>{previews++;return r.fulfill({json:{id:'test-preview',expiresIn:60,liveEnabled:true,payload:{price:'100.00'}}});});
+  await page.route('**/api/schwab/submit',r=>{submits++;return r.fulfill({json:{id:'test-preview',status:'accepted',orderId:'123'}});});
+  await page.route('**/api/schwab/activity',r=>r.fulfill({json:{operations:[{id:'test-preview',status:'unknown'}]}}));
+  await page.route('**/api/schwab/reconcile',r=>r.fulfill({json:{id:r.request().postDataJSON().id,status:'filled',brokerStatus:'FILLED'}}));
+  await page.goto('/');await page.getByRole('link',{name:'使用 ChatGPT 登录'}).click();await page.locator('[data-tab="integrations"]').click();
+  await expect(page.locator('#connection-message')).toContainText('授权已失效');
+  await page.locator('#schwab-accounts').click();
+  const form=page.locator('#schwab-order');
+  await form.locator('[name="symbol"]').fill('AAPL');await form.locator('[name="quantity"]').fill('1');await form.locator('[name="price"]').fill('100');
+  await form.getByRole('button').click();await expect(page.locator('#submit-live')).toBeEnabled();
+  await form.locator('[name="price"]').fill('101');await expect(page.locator('#submit-live')).toBeDisabled();expect(submits).toBe(0);
+  await form.getByRole('button').click();await expect(page.locator('#submit-live')).toBeEnabled();await page.locator('#submit-live').click();
+  await expect(page.locator('#order-preview')).toContainText('accepted');expect(previews).toBe(2);expect(submits).toBe(1);
+  await page.locator('#schwab-history').click();await expect(page.locator('#schwab-activity')).toContainText('unknown');
+  await page.locator('#schwab-reconcile [name="id"]').fill('test-preview');await page.locator('#schwab-reconcile [name="orderId"]').fill('123');
+  await page.locator('#schwab-reconcile').getByRole('button').click();await expect(page.locator('#schwab-activity')).toContainText('FILLED');
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
+});
