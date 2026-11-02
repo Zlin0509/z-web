@@ -1,6 +1,6 @@
 import {marketFetch} from './market-http.mjs';
 import {Problem} from './engine.mjs';
-const allowed=['DEEPSEEK_API_KEY','DEEPSEEK_MODEL','ALPACA_API_KEY','ALPACA_SECRET_KEY','SCHWAB_APP_KEY','SCHWAB_APP_SECRET','ALPHA_VANTAGE_API_KEY'];
+const allowed=['DEEPSEEK_API_KEY','DEEPSEEK_MODEL','ALPACA_API_KEY','ALPACA_SECRET_KEY','SCHWAB_APP_KEY','SCHWAB_APP_SECRET','ALPHA_VANTAGE_API_KEY','OKX_DEMO_API_KEY','OKX_DEMO_SECRET_KEY','OKX_DEMO_PASSPHRASE','OKX_LIVE_API_KEY','OKX_LIVE_SECRET_KEY','OKX_LIVE_PASSPHRASE','OKX_REGION'];
 const enc=new TextEncoder(),dec=new TextDecoder();
 const b64=b=>btoa(String.fromCharCode(...b));const un64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 async function key(env){if(!env.CONFIG_ENCRYPTION_KEY)throw new Problem(503,'密钥存储尚未初始化。');return crypto.subtle.importKey('raw',un64(env.CONFIG_ENCRYPTION_KEY),'AES-GCM',false,['encrypt','decrypt']);}
@@ -21,10 +21,12 @@ export async function configured(env){
   await Promise.all(rows.map(async row=>{const name=row.key.slice(7);result[name]=await decrypt(env,name,row.value,master);}));return result;
 }
 export async function settings(env){
-  const rows=(await env.DB.prepare("SELECT key,CASE WHEN key IN ('secret:DEEPSEEK_MODEL','schwab_auth_status') THEN value ELSE NULL END AS value FROM service_state WHERE key LIKE 'secret:%' OR key='schwab_auth_status'").all()).results;
+  const rows=(await env.DB.prepare("SELECT key,CASE WHEN key IN ('secret:DEEPSEEK_MODEL','secret:OKX_REGION','schwab_auth_status') THEN value ELSE NULL END AS value FROM service_state WHERE key LIKE 'secret:%' OR key='schwab_auth_status'").all()).results;
   const present=new Set(rows.filter(row=>row.key.startsWith('secret:')).map(row=>row.key.slice(7))),model=rows.find(row=>row.key==='secret:DEEPSEEK_MODEL');
   const authRow=rows.find(row=>row.key==='schwab_auth_status'),auth=authRow?JSON.parse(authRow.value):null;
-  return {configured:Object.fromEntries(allowed.map(n=>[n,present.has(n)||!!env[n]])),model:model?await decrypt(env,'DEEPSEEK_MODEL',model.value):env.DEEPSEEK_MODEL||'',schwabConnected:present.has('schwab_tokens')&&auth?.state!=='reauth_required',schwabAuth:auth??{state:present.has('schwab_tokens')?'unverified':'disconnected'},liveTrading:env.SCHWAB_LIVE_TRADING_ENABLED==='true'};
+  const regionRow=rows.find(row=>row.key==='secret:OKX_REGION');
+  const okxRegion=regionRow?await decrypt(env,'OKX_REGION',regionRow.value):env.OKX_REGION||'global';
+  return {okxRegion,okxLiveEnabled:env.OKX_LIVE_TRADING_ENABLED==='true',configured:Object.fromEntries(allowed.map(n=>[n,present.has(n)||!!env[n]])),model:model?await decrypt(env,'DEEPSEEK_MODEL',model.value):env.DEEPSEEK_MODEL||'',schwabConnected:present.has('schwab_tokens')&&auth?.state!=='reauth_required',schwabAuth:auth??{state:present.has('schwab_tokens')?'unverified':'disconnected'},liveTrading:env.SCHWAB_LIVE_TRADING_ENABLED==='true'};
 }
 export async function saveSettings(env,input){
   if(!input.values||typeof input.values!=='object'||Array.isArray(input.values))throw new Problem(400,'配置格式无效。');
@@ -32,6 +34,7 @@ export async function saveSettings(env,input){
   for(const [name,value] of entries){
     if(!allowed.includes(name)||typeof value!=='string'||value.length>4096||!value.trim())throw new Problem(400,'配置项或值无效；空白保留原值。');
   }
+  if(input.values.OKX_REGION&&!['global','us','eea'].includes(input.values.OKX_REGION))throw new Problem(400,'请选择正确的 OKX 区域。');
   const changes=[];
   for(const [name,value] of entries){
     const old=await getSecret(env,name)??env[name];
@@ -44,6 +47,7 @@ export async function saveSettings(env,input){
     statements.push(env.DB.prepare("DELETE FROM service_state WHERE key='secret:schwab_tokens' OR key GLOB 'oauth:*'"));
     statements.push(env.DB.prepare("INSERT INTO service_state(key,value) VALUES('schwab_auth_status',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({state:'disconnected'})));
   }
+  if(changes.some(([name])=>name.startsWith('OKX_')))statements.push(env.DB.prepare("INSERT INTO service_state(key,value) VALUES('okx:generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(crypto.randomUUID()));
   if(statements.length)await env.DB.batch(statements);
   return settings(env);
 }

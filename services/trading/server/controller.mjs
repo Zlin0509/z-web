@@ -1,3 +1,5 @@
+import * as okx from './okx.mjs';
+import * as okxRunner from './okx-runner.mjs';
 import {prepareIntraday} from './intraday.mjs';
 import {readSeries} from './series.mjs';
 import {libraryList,libraryItem,saveDraft,manageLibrary} from './strategy-library.mjs';
@@ -8,7 +10,7 @@ import {authorizeSync,readQuotes,syncMarket} from './snapshots.mjs';
 import {listStrategies,saveStrategy,proposeStrategy,researchHistory,finalizeResearch} from './strategies.mjs';
 import {Problem,parseCSV,indicators} from './engine.mjs';
 import {init,authorize,state,assetById,addAsset,removeAsset,removeAssets,importBars,runBacktest,startPaper,log} from './service.mjs';
-import {analyze,okxAccount,executeLiveOrder} from './providers.mjs';
+import {analyze,executeLiveOrder} from './providers.mjs';
 import {page,login} from '../ui/page.mjs';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'same-origin'};
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json; charset=utf-8'}});
@@ -17,7 +19,7 @@ async function body(request){if(!request.headers.get('content-type')?.startsWith
 export async function handleRequest(request,env,user){
   const path=new URL(request.url).pathname.replace(/\/+$/,'')||'/';
   try{
-    if(path==='/health')return json({service:'zlin-trading',status:'ok',execution:'paper_only'});
+    if(path==='/health')return json({service:'zlin-trading',status:'ok',execution:'local_paper_and_confirmed_exchange_orders'});
     if(!env.DB)throw new Problem(503,'交易数据库暂不可用。');
     // The audience can change outside the application. Never expose internal data
     // or mutations solely on the assumption of a private platform boundary.
@@ -37,11 +39,14 @@ export async function handleRequest(request,env,user){
     if(path==='/api/strategy-library'&&request.method==='GET')return json(await libraryList(env,new URL(request.url).searchParams));
     if(path==='/api/strategy-library/item'&&request.method==='GET'){const q=new URL(request.url).searchParams;return json(await libraryItem(env,q.get('kind'),q.get('id')));}
     if(path==='/api/settings'&&request.method==='GET')return json(await connections.settings(env));
-    if(path.startsWith('/api/schwab/')||['/schwab/callback','/api/deepseek/models','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
+    if(path==='/api/okx/status'&&request.method==='GET')return json(await connections.settings(env));
+    if(path.startsWith('/api/schwab/')||path.startsWith('/api/okx/')||['/schwab/callback','/api/deepseek/models','/api/analyze','/api/strategies/propose'].includes(path))env=await connections.configured(env);
     if(path==='/api/strategies/research'&&request.method==='GET')return json(await researchHistory(env,new URL(request.url).searchParams.get('asset')));
     if(path==='/api/strategies'&&request.method==='GET')return json(await listStrategies(env));
     if(path==='/schwab/callback'&&request.method==='GET'){await connections.finishOAuth(env,user,new URL(request.url));return new Response(null,{status:303,headers:{Location:'/#integrations','Cache-Control':'no-store'}});}
     if(path==='/api/deepseek/models'&&request.method==='GET')return json(await connections.deepseekModels(env));
+    if(path==='/api/okx/activity'&&request.method==='GET')return json(await okx.historyOKX(env));
+    if(path==='/api/okx/strategies'&&request.method==='GET')return json(await okxRunner.listOKXStrategies(env));
     if(path==='/api/schwab/activity'&&request.method==='GET')return json(await connections.operationHistory(env));
     if(path==='/api/quotes'&&request.method==='GET')return json(await readQuotes(env));
     if(path==='/api/schwab/accounts'&&request.method==='GET')return json({accounts:await connections.accounts(env),numbers:await connections.accountNumbers(env)});
@@ -90,7 +95,14 @@ export async function handleRequest(request,env,user){
       const id=crypto.randomUUID();await env.DB.prepare('INSERT INTO analyses(id,asset_id,created,data) VALUES (?,?,?,?)').bind(id,a.id,new Date().toISOString(),JSON.stringify({...data,asOf,priceBasis})).run();
       await log(env.DB,'analysis',{id,symbol:a.symbol,execution:'research_only'});return json(data);
     }
-    if(path==='/api/okx/check')return json(await okxAccount(env));
+    if(path==='/api/okx/check')return json(await okx.checkOKX(env,input.mode??'demo'));
+    if(path==='/api/okx/orders')return json(await okx.ordersOKX(env,input));
+    if(path==='/api/okx/preview')return json(await okx.previewOKX(env,{...input,runnerId:null}));
+    if(path==='/api/okx/submit')return json(await okx.submitOKX(env,input));
+    if(path==='/api/okx/reconcile')return json(await okx.reconcileOKX(env,input));
+    if(path==='/api/okx/cancel')return json(await okx.cancelOKX(env,input));
+    if(path==='/api/okx/strategy/start')return json(await okxRunner.startOKXStrategy(env,input),201);
+    if(path==='/api/okx/strategy/stop')return json(await okxRunner.stopOKXStrategy(env,input));
     if(path==='/api/orders')return executeLiveOrder();
     throw new Problem(404,'接口不存在。');
   }catch(error){const status=error instanceof Problem?error.status:500;if(status===500)console.error('Trading service failure',path,error?.message);const message=error instanceof Problem?error.message:'服务暂时不可用，请稍后重试。';if(path==='/')return html(login(message),status);return json({error:message},status);}

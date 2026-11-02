@@ -5,6 +5,7 @@ async function call(path,data){const r=await fetch('/api'+path,{method:data===un
 // Only non-sensitive presence flags and model IDs are kept in page memory.
 let settingsCache=null,settingsPending=null,settingsEpoch=0,modelsCache=null,modelsPending=null,modelsEpoch=0;
 function rememberSettings(value){settingsCache={value,at:Date.now()};window.dispatchEvent(new CustomEvent('trading:settings',{detail:value}));return value;}
+window.addEventListener('trading:settings-invalidated',()=>{settingsEpoch++;settingsCache=null;settingsPending=null;});
 function getSettings(){
   if(settingsCache&&Date.now()-settingsCache.at<60000)return Promise.resolve(settingsCache.value);
   if(settingsPending)return settingsPending;

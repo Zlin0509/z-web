@@ -28,7 +28,7 @@ export async function state(db,env,selected=null){
     db.prepare('SELECT * FROM analyses ORDER BY created DESC LIMIT 20').all()
   ]);
   const chosen=selected?(assets.results.find(a=>a.id===selected)||assets.results[0]):null;
-  return {...(selected?{selectedAsset:chosen?{...chosen,data:JSON.parse(chosen.data)}:null}:{}),assets:assets.results.map(describe),runs:runs.results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:sessions.results.map(r=>({...r,data:JSON.parse(r.data)})),events:events.results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:analyses.results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!(env.ALPHA_VANTAGE_API_KEY||(env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY)),okxAccount:!!(env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
+  return {...(selected?{selectedAsset:chosen?{...chosen,data:JSON.parse(chosen.data)}:null}:{}),assets:assets.results.map(describe),runs:runs.results.map(r=>({...r,result:JSON.parse(r.result)})),sessions:sessions.results.map(r=>({...r,data:JSON.parse(r.data)})),events:events.results.map(x=>({...x,detail:JSON.parse(x.detail)})),analyses:analyses.results.map(x=>({...x,data:JSON.parse(x.data)})),connections:{okxMarket:true,usData:!!(env.ALPHA_VANTAGE_API_KEY||(env.ALPACA_API_KEY&&env.ALPACA_SECRET_KEY)),okxAccount:!!((env.OKX_API_KEY&&env.OKX_SECRET_KEY&&env.OKX_PASSPHRASE)||(env.OKX_DEMO_API_KEY&&env.OKX_DEMO_SECRET_KEY&&env.OKX_DEMO_PASSPHRASE)||(env.OKX_LIVE_API_KEY&&env.OKX_LIVE_SECRET_KEY&&env.OKX_LIVE_PASSPHRASE)),deepseek:!!(env.DEEPSEEK_API_KEY&&env.DEEPSEEK_MODEL),liveTrading:false},updated:now()};
 }
 export async function addAsset(db,input){
   const {market}=input,symbol=String(input.symbol??'').trim().toUpperCase();const source=input.source??(market==='crypto'?'okx':'alpha');
@@ -42,7 +42,8 @@ export async function removeAsset(db,id,revision){
   const result=await db.batch([
     db.prepare('DELETE FROM assets WHERE id=? AND revision=?').bind(id,revision),
     db.prepare("UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id=? AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id),
-    db.prepare('DELETE FROM service_state WHERE key=? AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)').bind(seriesKey(id),id)
+    db.prepare('DELETE FROM service_state WHERE key=? AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)').bind(seriesKey(id),id),
+    db.prepare("UPDATE service_state SET value=json_set(value,'$.status','stopped','$.message','标的已移除，停止新信号；已有委托需单独撤单。') WHERE key GLOB 'okx:strategy:*' AND json_extract(value,'$.assetId')=? AND json_extract(value,'$.status') IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=?)").bind(id,id)
   ]);
   if(result[0].meta.changes!==1)throw new Problem(409,'标的数据已更新，请刷新后再删除。');
   await log(db,'asset_removed',{symbol:asset.symbol,stopped:result[1].meta.changes,history:'retained'});
@@ -54,7 +55,8 @@ export async function removeAssets(db,input){
   const result=await db.batch([
     db.prepare(`DELETE FROM assets WHERE id IN (${placeholders}) AND (SELECT count(*) FROM assets WHERE ${guard})=?`).bind(...ids,...input.flatMap(x=>[x.assetId,x.revision]),input.length),
     db.prepare(`UPDATE paper_sessions SET status='stopped',revision=revision+1 WHERE asset_id IN (${placeholders}) AND status IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE assets.id=paper_sessions.asset_id)`).bind(...ids),
-    db.prepare("DELETE FROM service_state WHERE key GLOB 'market_series:15m:*' AND json_extract(value,'$.assetId') IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM assets WHERE id=json_extract(service_state.value,'$.assetId'))").bind(JSON.stringify(ids))
+    db.prepare("DELETE FROM service_state WHERE key GLOB 'market_series:15m:*' AND json_extract(value,'$.assetId') IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM assets WHERE id=json_extract(service_state.value,'$.assetId'))").bind(JSON.stringify(ids)),
+    db.prepare("UPDATE service_state SET value=json_set(value,'$.status','stopped','$.message','标的已移除，停止新信号；已有委托需单独撤单。') WHERE key GLOB 'okx:strategy:*' AND json_extract(value,'$.assetId') IN (SELECT value FROM json_each(?)) AND json_extract(value,'$.status') IN ('running','paused') AND NOT EXISTS(SELECT 1 FROM assets WHERE id=json_extract(service_state.value,'$.assetId'))").bind(JSON.stringify(ids))
   ]);
   if(result[0].meta.changes!==ids.length)throw new Problem(409,'列表数据已更新，本次未删除；请读取数据库后重新勾选。');
   await log(db,'asset_removed',{symbols:ids.map(x=>x.split(':')[1]),stopped:result[1].meta.changes,history:'retained'});return {ok:true,removed:ids,stopped:result[1].meta.changes};
